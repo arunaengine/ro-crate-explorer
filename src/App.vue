@@ -656,7 +656,7 @@ onMounted(() => {
               <div class="absolute inset-0 flex items-center"><span class="w-full border-t border-[var(--c-border)]" /></div>
               <div class="relative flex justify-center text-xs uppercase tracking-wider"><span class="bg-[var(--c-bg-card)] px-2 text-[var(--c-text-muted)]/60">Or load from URL</span></div>
             </div>
-            <div class="flex w-full items-center space-x-2">
+            <div class="flex w-full items-center space-x-2 gap-2">
               <input v-model="inputUrl" type="text" class="flex h-11 w-full rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500" placeholder="https://..." />
               <Button class="h-11 px-6 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white" @click="loadFromUrl">Load</Button>
             </div>
