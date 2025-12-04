@@ -9,6 +9,7 @@ import JSZip from 'jszip'
 import {
   AlertDialog,
   AlertDialogAction,
+  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
@@ -503,6 +504,13 @@ onMounted(() => {
 
     <AlertDialog :open="isDetailOverlayOpen" @update:open="isDetailOverlayOpen = $event">
       <AlertDialogContent class="text-[var(--c-text-muted)] bg-[var(--c-bg-card)] border-[var(--c-border)] max-w-4xl max-h-[80vh] overflow-y-auto">
+        <button
+          class="absolute right-4 top-4 p-1 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none hover:bg-[var(--c-hover)] text-[var(--c-text-muted)]"
+          @click="isDetailOverlayOpen = false"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          <span class="sr-only">Close</span>
+        </button>
         <AlertDialogHeader>
           <AlertDialogTitle class="flex items-center gap-2 text-[var(--c-text-main)]"><span class="bg-[var(--c-hover)] text-[#00A0CC] text-xs px-2 py-0.5 rounded uppercase">Linked Entity</span> {{ linkedEntityData?.id }}</AlertDialogTitle>
           <AlertDialogDescription class="text-[var(--c-text-muted)]/80">Type: {{ linkedEntityData?.type }}</AlertDialogDescription>
