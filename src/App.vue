@@ -4,7 +4,6 @@ import FileTreeItem from '@/components/custom-ui/FileTreeItem.vue'
 import { ROCrate } from 'ro-crate'
 import { onMounted, ref, computed, watch } from 'vue'
 import { Button } from '@/components/ui/button'
-import JSZip from 'jszip'
 
 import {
   AlertDialog,
@@ -20,6 +19,8 @@ import {Card, CardContent, CardDescription, CardHeader, CardTitle} from "@/compo
 
 import arunaBg from '@/assets/aruna-background.jpeg'
 
+const INDEXING_SERVICE_BASE_URL = 'http://localhost:3000';
+
 interface TreeNode {
   name: string;
   id: string;
@@ -31,6 +32,20 @@ interface TreeNode {
 interface HistoryItem {
   name: string;
   url: string | null;
+}
+
+interface CrateSummary {
+  primary_crate: {
+    crate_id: string;
+    entity_count: number;
+    is_subcrate: boolean;
+  };
+  subcrates: Array<{
+    crate_id: string;
+    entity_count: number;
+    is_subcrate: boolean;
+  }>;
+  total_crates_added: number;
 }
 
 // State
@@ -237,29 +252,64 @@ const processCrateData = (json: any, sourceName: string, sourceUrl: string | nul
   }
 }
 
-// --- Logic: Loading Sources ---
+
+const fetchMetadata = async (crateId: string, sourceName: string, sourceUrl: string | null = null) => {
+  try {
+    let apiCrateId = crateId.endsWith('/') ? crateId.slice(0, -1) : crateId;
+
+    const metadataEndpoint = `${INDEXING_SERVICE_BASE_URL}/crates/${encodeURIComponent(apiCrateId)}`;
+
+    const response = await fetch(metadataEndpoint);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Error fetching metadata (${response.status}): ${errText}`);
+    }
+
+    const metadataJson = await response.json();
+    processCrateData(metadataJson, sourceName, sourceUrl);
+  } catch (e: any) {
+    throw new Error(`Metadata fetch failed: ${e.message}`);
+  }
+}
+
 const loadFromUrl = async () => {
   if (!inputUrl.value) return;
   isLoading.value = true;
   errorMsg.value = null;
 
   try {
-    let fetchUrl = inputUrl.value;
-    if (!fetchUrl.toLowerCase().endsWith('.json')) {
-      fetchUrl = fetchUrl.endsWith('/') ? fetchUrl + 'ro-crate-metadata.json' : fetchUrl + '/ro-crate-metadata.json';
+    const fetchUrl = inputUrl.value;
+
+    const summaryResponse = await fetch(`${INDEXING_SERVICE_BASE_URL}/crates/url`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url: fetchUrl })
+    });
+
+    if (!summaryResponse.ok) {
+      const errText = await summaryResponse.text();
+      throw new Error(`Server Error (${summaryResponse.status}): ${errText}`);
     }
 
-    const urlObj = new URL(fetchUrl);
-    const pathParts = urlObj.pathname.split('/');
-    if (pathParts[pathParts.length - 1].includes('.json')) pathParts.pop();
-    urlObj.pathname = pathParts.join('/') + '/';
-    baseUrl.value = urlObj.href;
+    const summary: CrateSummary = await summaryResponse.json();
 
-    const response = await fetch(fetchUrl);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const json = await response.json();
+    // Determine Base URL for subcrate navigation logic
+    let crateId = summary.primary_crate.crate_id;
+    try {
+      const urlObj = new URL(crateId);
+      urlObj.pathname = urlObj.pathname.endsWith('/') ? urlObj.pathname : urlObj.pathname + '/';
+      baseUrl.value = urlObj.href;
+    } catch (e) {
+      // Fallback if crateId isn't a clean URL (e.g., local ID)
+      baseUrl.value = crateId.endsWith('/') ? crateId : crateId + '/';
+    }
 
-    processCrateData(json, 'Remote Crate', fetchUrl);
+
+    // 2. Fetch the actual metadata JSON-LD
+    await fetchMetadata(crateId, 'Remote Crate', fetchUrl);
 
   } catch (e: any) {
     errorMsg.value = `Error loading URL: ${e.message}`;
@@ -278,29 +328,25 @@ const handleFileUpload = async (event: Event) => {
   baseUrl.value = '';
 
   try {
-    let jsonContent = null;
+    const formData = new FormData();
+    formData.append('file', file);
 
-    if (file.name.endsWith('.zip')) {
-      const zip = await JSZip.loadAsync(file);
-      let metadataFile = zip.file('ro-crate-metadata.json');
-      if (!metadataFile) {
-        const allFiles = Object.keys(zip.files);
-        const foundPath = allFiles.find(p => p.endsWith('ro-crate-metadata.json') && !p.startsWith('__MACOSX'));
-        if (foundPath) metadataFile = zip.file(foundPath);
-      }
-      if (!metadataFile) throw new Error("No 'ro-crate-metadata.json' found in ZIP.");
-      const text = await metadataFile.async('string');
-      jsonContent = JSON.parse(text);
-    }
-    else if (file.name.endsWith('.json')) {
-      const text = await file.text();
-      jsonContent = JSON.parse(text);
-    }
-    else {
-      throw new Error("Unsupported file type. Please upload .json or .zip");
+    const summaryResponse = await fetch(`${INDEXING_SERVICE_BASE_URL}/crates/upload`, {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!summaryResponse.ok) {
+      const errText = await summaryResponse.text();
+      throw new Error(`Server Error (${summaryResponse.status}): ${errText}`);
     }
 
-    processCrateData(jsonContent, file.name, null);
+    const summary: CrateSummary = await summaryResponse.json();
+
+    let crateId = summary.primary_crate.crate_id;
+    baseUrl.value = crateId.endsWith('/') ? crateId : crateId + '/';
+
+    await fetchMetadata(crateId, file.name, null);
 
   } catch (e: any) {
     errorMsg.value = `File error: ${e.message}`;
@@ -329,15 +375,45 @@ const handleSubcrateOpen = (subcrateId: string) => {
     alert("Subcrate navigation is currently only supported for URL-loaded crates.");
     return;
   }
-  let nextUrl = new URL(subcrateId, baseUrl.value).href;
-  if (!nextUrl.toLowerCase().endsWith('.json')) {
-    if (!nextUrl.endsWith('/')) nextUrl += '/';
-    nextUrl += 'ro-crate-metadata.json';
+
+  let apiCrateId = subcrateId;
+
+  try {
+    const fullUrl = new URL(subcrateId, baseUrl.value);
+
+    if (fullUrl.pathname.toLowerCase().endsWith('ro-crate-metadata.json')) {
+      const pathParts = fullUrl.pathname.split('/');
+      pathParts.pop();
+
+      fullUrl.pathname = pathParts.join('/');
+
+      if (!fullUrl.pathname.endsWith('/')) {
+        fullUrl.pathname += '/';
+      }
+
+      apiCrateId = fullUrl.href;
+    }
+  } catch (e) {
+    const filenameRegex = /[\/\\]ro-crate-metadata\.json$/i;
+    if (filenameRegex.test(apiCrateId)) {
+      apiCrateId = apiCrateId.replace(filenameRegex, '');
+    }
   }
 
+  if (apiCrateId === '') apiCrateId = '.';
+
+  let nextUrl = new URL(subcrateId, baseUrl.value).href;
+
   historyStack.value.push({ name: currentCrateName.value, url: currentUrl.value });
-  inputUrl.value = nextUrl;
-  loadFromUrl();
+
+  currentUrl.value = nextUrl;
+
+  isLoading.value = true;
+  errorMsg.value = null;
+
+  fetchMetadata(apiCrateId, 'Subcrate', nextUrl).finally(() => {
+    isLoading.value = false;
+  });
 };
 
 const goToBreadcrumb = (index: number) => {
@@ -364,6 +440,7 @@ const resetApp = () => {
   historyStack.value = [];
   currentUrl.value = null;
   errorMsg.value = null;
+  inputUrl.value = 'https://rocrate.s3.computational.bio.uni-giessen.de/ro-crate-metadata.json';
 };
 
 onMounted(() => {
