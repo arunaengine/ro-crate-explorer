@@ -72,6 +72,14 @@ const fullCrateJson = ref<string | null>(null)
 const isLoading = ref(false)
 const baseUrl = ref<string>('')
 const errorMsg = ref<string | null>(null)
+const shareStatus = ref<string | null>(null)
+const shareError = ref<string | null>(null)
+const shareToastMessage = ref<string | null>(null)
+const shareToastIsError = ref(false)
+const shareToastVisible = ref(false)
+let shareToastTimeout: ReturnType<typeof setTimeout> | null = null
+
+const SHARE_URL_LIMIT = 8000
 
 // --- Search State ---
 const isSearchOverlayOpen = ref(false)
@@ -266,6 +274,8 @@ const processCrateData = (json: any, sourceName: string, sourceUrl: string | nul
     selectedEntityId.value = './';
     selectedEntityData.value = null;
     errorMsg.value = null;
+    shareStatus.value = null;
+    shareError.value = null;
     contextFilterInput.value = '';
 
     try {
@@ -603,6 +613,8 @@ const resetApp = () => {
   historyStack.value = [];
   currentUrl.value = null;
   errorMsg.value = null;
+  shareStatus.value = null;
+  shareError.value = null;
   baseUrl.value = '';
   inputUrl.value = 'https://rocrate.s3.computational.bio.uni-giessen.de/ro-crate-metadata.json';
   contextFilterInput.value = ''; // MODIFIED: Reset filter input on app reset
@@ -617,7 +629,20 @@ const resetApp = () => {
 onMounted(() => {
   const urlParams = new URLSearchParams(window.location.search);
   const crateUrlParam = urlParams.get('crateUrl');
-  if (crateUrlParam) {
+  const crateParam = urlParams.get('crate');
+
+  if (crateParam) {
+    try {
+      const parsed = JSON.parse(crateParam);
+      processCrateData(parsed, 'Shared Crate', null);
+
+      const cleanUrl = new URL(window.location.href);
+      cleanUrl.searchParams.delete('crate');
+      window.history.replaceState({}, '', cleanUrl.toString());
+    } catch (e: any) {
+      errorMsg.value = `Failed to load shared crate: ${e.message || e}`;
+    }
+  } else if (crateUrlParam) {
     inputUrl.value = decodeURIComponent(crateUrlParam);
     loadFromUrl();
   }
@@ -632,6 +657,52 @@ onMounted(() => {
     document.documentElement.classList.add('dark')
   }
 })
+
+const showShareToast = (message: string, isError = false) => {
+  shareToastMessage.value = message;
+  shareToastIsError.value = isError;
+  shareToastVisible.value = true;
+
+  if (shareToastTimeout) {
+    clearTimeout(shareToastTimeout);
+  }
+
+  shareToastTimeout = setTimeout(() => {
+    shareToastVisible.value = false;
+  }, 3500);
+};
+
+const copyShareLink = async () => {
+  shareStatus.value = null;
+  shareError.value = null;
+
+  if (!fullCrateJson.value) {
+    shareError.value = 'Load a crate first to share.';
+    showShareToast(shareError.value, true);
+    return;
+  }
+
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('crateUrl');
+    url.searchParams.set('crate', fullCrateJson.value);
+
+    const shareLink = url.toString();
+
+    if (shareLink.length > SHARE_URL_LIMIT) {
+      shareError.value = `Crate is too large to share via URL (length ${shareLink.length} > limit ${SHARE_URL_LIMIT}).`;
+      showShareToast(shareError.value, true);
+      return;
+    }
+
+    await navigator.clipboard.writeText(shareLink);
+    shareStatus.value = 'Share link copied to clipboard.';
+    showShareToast(shareStatus.value);
+  } catch (e: any) {
+    shareError.value = `Failed to copy share link: ${e.message || e}`;
+    showShareToast(shareError.value, true);
+  }
+};
 </script>
 
 <template>
@@ -648,7 +719,19 @@ onMounted(() => {
         <h1 class="text-3xl font-light text-[var(--c-text-main)] cursor-pointer select-none hover:text-[#00A0CC] transition-colors" @click="resetApp">
           RO-Crate Explorer
         </h1>
-        <div class="flex items-center gap-4">
+        <div class="flex items-center gap-3">
+          <Button
+            v-if="allEntities.length > 0"
+            variant="ghost"
+            size="sm"
+            class="h-9 px-3 rounded-full border border-[var(--c-border)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)]"
+            @click="copyShareLink"
+            :disabled="!fullCrateJson"
+            title="Copy a shareable URL with the current crate embedded"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><path d="M15 7h3a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-3"/><path d="M10 14H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v4"/><path d="M10 10 14 6"/><path d="M10 6h4v4"/></svg>
+            Share
+          </Button>
           <Button
             v-if="allEntities.length > 0"
             variant="ghost"
@@ -686,20 +769,17 @@ onMounted(() => {
         <Card class="w-full max-w-xl shadow-xl bg-[var(--c-bg-card)] border-[var(--c-border)]">
           <CardHeader>
             <CardTitle class="text-2xl text-center text-[var(--c-text-main)]">Load RO-Crate</CardTitle>
-            <CardDescription class="text-center text-[var(--c-text-muted)]">Upload a ZIP/JSON file or provide a URL.</CardDescription>
+            <CardDescription class="text-center text-[var(--c-text-muted)]">Paste JSON, provide a URL, or upload a ZIP/JSON file.</CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-8 p-8">
-            <div class="space-y-3">
-              <label class="text-sm font-semibold text-[var(--c-text-muted)] block text-center">Upload File</label>
-              <div class="flex items-center justify-center w-full">
-                <label for="dropzone-file" class="flex flex-col items-center justify-center w-full h-40 border-2 border-[var(--c-border)] border-dashed rounded-lg cursor-pointer bg-[var(--c-bg-app)] hover:bg-[var(--c-hover)] transition-colors group">
-                  <div class="flex flex-col items-center justify-center pt-5 pb-6 text-center">
-                    <p class="text-sm text-[var(--c-text-muted)] group-hover:text-[var(--c-text-main)] transition-colors"><span class="font-semibold text-[#00A0CC]">Click to upload</span> or drag and drop</p>
-                    <p class="text-xs text-[var(--c-text-muted)]/60 mt-1">.zip archive or .json metadata</p>
-                  </div>
-                  <input id="dropzone-file" type="file" class="hidden" accept=".json,.zip" @change="handleFileUpload" />
-                </label>
-              </div>
+            <div class="space-y-2">
+              <label class="text-sm font-semibold text-[var(--c-text-muted)] block text-center">Paste the contents of <code>ro-crate-metadata.json</code></label>
+              <textarea
+                v-model="pastedCrateText"
+                class="w-full min-h-[180px] rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
+                placeholder='{\n  "@context": "https://w3id.org/ro/crate/1.1/context",\n  "@graph": [ ... ]\n}'
+              ></textarea>
+              <Button class="w-full h-11 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white" @click="loadFromPastedJson">Load Pasted Crate</Button>
             </div>
             <div class="relative">
               <div class="absolute inset-0 flex items-center"><span class="w-full border-t border-[var(--c-border)]" /></div>
@@ -711,16 +791,19 @@ onMounted(() => {
             </div>
             <div class="relative">
               <div class="absolute inset-0 flex items-center"><span class="w-full border-t border-[var(--c-border)]" /></div>
-              <div class="relative flex justify-center text-xs uppercase tracking-wider"><span class="bg-[var(--c-bg-card)] px-2 text-[var(--c-text-muted)]/60">Or paste RO-Crate JSON-LD</span></div>
+              <div class="relative flex justify-center text-xs uppercase tracking-wider"><span class="bg-[var(--c-bg-card)] px-2 text-[var(--c-text-muted)]/60">Or upload a file</span></div>
             </div>
-            <div class="space-y-2">
-              <label class="text-sm font-semibold text-[var(--c-text-muted)] block text-center">Paste the contents of <code>ro-crate-metadata.json</code></label>
-              <textarea
-                v-model="pastedCrateText"
-                class="w-full min-h-[180px] rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
-                placeholder='{\n  "@context": "https://w3id.org/ro/crate/1.1/context",\n  "@graph": [ ... ]\n}'
-              ></textarea>
-              <Button class="w-full h-11 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white" @click="loadFromPastedJson">Load Pasted Crate</Button>
+            <div class="space-y-3">
+              <label class="text-sm font-semibold text-[var(--c-text-muted)] block text-center">Upload File</label>
+              <div class="flex items-center justify-center w-full">
+                <label for="dropzone-file" class="flex flex-col items-center justify-center w-full h-32 border-2 border-[var(--c-border)] border-dashed rounded-lg cursor-pointer bg-[var(--c-bg-app)] hover:bg-[var(--c-hover)] transition-colors group">
+                  <div class="flex flex-col items-center justify-center pt-5 pb-6 text-center">
+                    <p class="text-sm text-[var(--c-text-muted)] group-hover:text-[var(--c-text-main)] transition-colors"><span class="font-semibold text-[#00A0CC]">Click to upload</span> or drag and drop</p>
+                    <p class="text-xs text-[var(--c-text-muted)]/60 mt-1">.zip archive or .json metadata</p>
+                  </div>
+                  <input id="dropzone-file" type="file" class="hidden" accept=".json,.zip" @change="handleFileUpload" />
+                </label>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -862,6 +945,17 @@ onMounted(() => {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+
+    <div v-if="shareToastVisible && shareToastMessage" class="fixed bottom-4 right-4 z-50">
+      <div
+        class="rounded-md px-4 py-3 shadow-lg text-sm border"
+        :class="shareToastIsError ? 'bg-red-100 text-red-800 border-red-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200'"
+        role="status"
+        aria-live="polite"
+      >
+        {{ shareToastMessage }}
+      </div>
+    </div>
 
   </div>
 </template>
