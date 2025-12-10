@@ -52,6 +52,7 @@ const inputUrl = ref<string>('https://rocrate.s3.computational.bio.uni-giessen.d
 const currentUrl = ref<string | null>(null)
 const crate = ref<ROCrate | undefined>(undefined)
 const currentCrateName = ref<string>('Root')
+const pastedCrateText = ref<string>('')
 
 const historyStack = ref<HistoryItem[]>([])
 const allEntities = ref<Array<any>>([])
@@ -387,6 +388,22 @@ const loadFromUrl = async () => {
   }
 };
 
+const loadFromPastedJson = async () => {
+  if (!pastedCrateText.value.trim()) return;
+  isLoading.value = true;
+  errorMsg.value = null;
+  baseUrl.value = '';
+
+  try {
+    const parsed = JSON.parse(pastedCrateText.value);
+    processCrateData(parsed, 'Pasted Crate', null);
+  } catch (e: any) {
+    errorMsg.value = `Paste error: ${e.message || e}`;
+  } finally {
+    isLoading.value = false;
+  }
+};
+
 const handleFileUpload = async (event: Event) => {
   const target = event.target as HTMLInputElement;
   if (!target.files || target.files.length === 0) return;
@@ -687,6 +704,19 @@ onMounted(() => {
             <div class="flex w-full items-center space-x-2 gap-2">
               <input v-model="inputUrl" type="text" class="flex h-11 w-full rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500" placeholder="https://..." />
               <Button class="h-11 px-6 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white" @click="loadFromUrl">Load</Button>
+            </div>
+            <div class="relative">
+              <div class="absolute inset-0 flex items-center"><span class="w-full border-t border-[var(--c-border)]" /></div>
+              <div class="relative flex justify-center text-xs uppercase tracking-wider"><span class="bg-[var(--c-bg-card)] px-2 text-[var(--c-text-muted)]/60">Or paste RO-Crate JSON-LD</span></div>
+            </div>
+            <div class="space-y-2">
+              <label class="text-sm font-semibold text-[var(--c-text-muted)] block text-center">Paste the contents of <code>ro-crate-metadata.json</code></label>
+              <textarea
+                v-model="pastedCrateText"
+                class="w-full min-h-[180px] rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
+                placeholder='{\n  "@context": "https://w3id.org/ro/crate/1.1/context",\n  "@graph": [ ... ]\n}'
+              ></textarea>
+              <Button class="w-full h-11 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white" @click="loadFromPastedJson">Load Pasted Crate</Button>
             </div>
           </CardContent>
         </Card>
