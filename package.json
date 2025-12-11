@@ -19,17 +19,19 @@
     "@vueuse/core": "^14.1.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "jsonld": "^9.0.0",
+    "jszip": "^3.10.1",
     "lucide-vue-next": "^0.555.0",
     "reka-ui": "^2.6.1",
     "ro-crate": "^3.6.1",
     "tailwind-merge": "^3.4.0",
     "tailwindcss": "^4.1.17",
     "vue": "^3.5.25",
-    "vue-router": "^4.6.3",
-    "jszip": "^3.10.1"
+    "vue-router": "^4.6.3"
   },
   "devDependencies": {
     "@tsconfig/node24": "^24.0.3",
+    "@types/jsonld": "^1.5.15",
     "@types/node": "^24.10.1",
     "@vitejs/plugin-vue": "^6.0.2",
     "@vue/tsconfig": "^0.8.1",
