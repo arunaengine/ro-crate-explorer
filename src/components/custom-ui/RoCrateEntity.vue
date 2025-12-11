@@ -26,8 +26,8 @@ let props = defineProps<{
   id: string
   type: string
   otherProps: Array<string>
-  expandedCrate: any[]
   fullCrateJson: string | null
+  linkedData: Record<string, { propIri?: string; valueIris: string[] }>
 }>()
 
 const emit = defineEmits<{
@@ -245,6 +245,9 @@ const downloadRawJson = () => {
 const normalizeValues = (val: any) => {
   return Array.isArray(val) ? val : [val]
 }
+
+const propIri = (key: string) => props.linkedData?.[key]?.propIri
+const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?.[index]
 </script>
 
 <template>
@@ -412,9 +415,34 @@ const normalizeValues = (val: any) => {
         class="flex flex-col sm:flex-row border-b border-[var(--c-border)] last:border-0 hover:bg-[var(--c-hover)] transition-colors group"
       >
         <div
-          class="w-full sm:w-1/4 min-w-[120px] p-3 text-sm font-semibold text-[var(--c-text-muted)] bg-[var(--c-bg-app)]/50 break-words"
+          class="w-full sm:w-1/4 min-w-[120px] p-3 text-sm font-semibold text-[var(--c-text-muted)] bg-[var(--c-bg-app)]/50 break-words flex items-center gap-2"
         >
-          {{ getKey(propString) }}
+          <span class="truncate">{{ getKey(propString) }}</span>
+          <a
+            v-if="propIri(getKey(propString))"
+            :href="propIri(getKey(propString))"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-[var(--c-text-muted)] hover:text-[#00A0CC]"
+            title="View expanded property IRI"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="opacity-70"
+            >
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+              <polyline points="15 3 21 3 21 9" />
+              <line x1="10" y1="14" x2="21" y2="3" />
+            </svg>
+          </a>
         </div>
 
         <div class="w-full sm:w-3/4 p-3 text-sm text-[var(--c-text-muted)] break-words min-w-0">
@@ -562,6 +590,36 @@ const normalizeValues = (val: any) => {
                   </span>
                 </div>
 
+                <div
+                  v-else-if="valueIri(getKey(propString), i)"
+                  class="flex items-center gap-2"
+                >
+                  <a
+                    :href="valueIri(getKey(propString), i)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="text-[var(--c-text-muted)] hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
+                  >
+                    {{ valueIri(getKey(propString), i) }}
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="10"
+                      height="10"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      class="opacity-70"
+                    >
+                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                      <polyline points="15 3 21 3 21 9" />
+                      <line x1="10" y1="14" x2="21" y2="3" />
+                    </svg>
+                  </a>
+                </div>
+
                 <div v-else-if="item['@id']" class="text-sm text-red-400/70 font-mono break-all">
                   {{ item['@id'] }} <span class="text-xs opacity-50">(Unresolved)</span>
                 </div>
@@ -585,6 +643,35 @@ const normalizeValues = (val: any) => {
                 class="text-[var(--c-text-muted)] hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
               >
                 {{ getValue(propString) }}
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="opacity-70"
+                >
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                  <polyline points="15 3 21 3 21 9" />
+                  <line x1="10" y1="14" x2="21" y2="3" />
+                </svg>
+              </a>
+            </div>
+            <div
+              v-else-if="valueIri(getKey(propString), 0)"
+              class="flex items-center gap-2"
+            >
+              <a
+                :href="valueIri(getKey(propString), 0)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-[var(--c-text-muted)] hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
+              >
+                {{ valueIri(getKey(propString), 0) }}
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   width="10"

@@ -68,6 +68,9 @@ const historyStack = ref<HistoryItem[]>([]);
 const allEntities = ref<Array<any>>([]);
 
 const expandedCrate = ref<any[]>([]);
+const linkedDataHints = ref<Record<string, Record<string, { propIri?: string; valueIris: string[] }>>>(
+  {}
+);
 // Selection State
 const selectedEntityId = ref<string>("./");
 const selectedEntityData = ref<{
@@ -271,6 +274,52 @@ const extractEntityData = (entity: any) => {
   return { id, type: Array.isArray(type) ? type.join(", ") : type, otherProps };
 };
 
+// Build a lookup of expanded property IRIs and value IRIs once per crate
+const buildLinkedDataHints = async (json: any, expandedNodes: any[]) => {
+  const context = json["@context"];
+  if (!context) return {};
+
+  const propertyCache = new Map<string, string | undefined>();
+
+  const expandProperty = async (propName: string) => {
+    if (propertyCache.has(propName)) return propertyCache.get(propName);
+    try {
+      const expanded = await jsonld.expand({ "@context": context, [propName]: "x" });
+      const node = expanded?.[0] || {};
+      const iri = Object.keys(node).find((k) => !k.startsWith("@"));
+      propertyCache.set(propName, iri);
+      return iri;
+    } catch (e) {
+      propertyCache.set(propName, undefined);
+      return undefined;
+    }
+  };
+
+  const hints: Record<string, Record<string, { propIri?: string; valueIris: string[] }>> = {};
+
+  for (const entity of json["@graph"] || []) {
+    const expandedNode = expandedNodes.find((n) => n["@id"] === entity["@id"]) || {};
+    const props = Object.keys(entity).filter((k) => k !== "@id" && k !== "@type");
+
+    const entries = await Promise.all(
+      props.map(async (propName) => {
+        const propIri = await expandProperty(propName);
+        const values =
+          propIri && Array.isArray(expandedNode[propIri])
+            ? expandedNode[propIri]
+                .map((v: any) => (v && typeof v === "object" ? v["@id"] : null))
+                .filter((x: any): x is string => typeof x === "string")
+            : [];
+        return [propName, { propIri, valueIris: values }];
+      })
+    );
+
+    hints[entity["@id"]] = Object.fromEntries(entries);
+  }
+
+  return hints;
+};
+
 const updateSelectedEntityView = () => {
   let entity = allEntities.value.find((e) => e["@id"] === selectedEntityId.value);
   if (!entity && (selectedEntityId.value === "./" || selectedEntityId.value === ".")) {
@@ -307,9 +356,13 @@ const processCrateData = async (
       console.log("Expanded crate:");
       console.log({ expandedCrate });
       console.log(expandedCrate);
+
+      // Precompute linked-data hints (property/value IRIs) once per crate
+      linkedDataHints.value = await buildLinkedDataHints(json, expanded);
     } catch (e) {
       console.error("Expansion failed:", e);
       expandedCrate.value = [];
+      linkedDataHints.value = {};
     }
 
     const rootEntity =
@@ -646,6 +699,7 @@ const goBack = () => {
 const resetApp = () => {
   crate.value = undefined;
   allEntities.value = [];
+  linkedDataHints.value = {};
   historyStack.value = [];
   currentUrl.value = null;
   errorMsg.value = null;
@@ -1115,7 +1169,7 @@ const copyShareLink = async () => {
                 :type="selectedEntityData.type"
                 :otherProps="selectedEntityData.otherProps"
                 :fullCrateJson="fullCrateJson"
-                :expandedCrate="expandedCrate"
+                :linkedData="linkedDataHints[selectedEntityId] || {}"
                 @select-link="handleSelectLink"
                 @open-subcrate="handleSubcrateOpen"
                 class="w-full"
