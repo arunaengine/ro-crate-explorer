@@ -26,6 +26,7 @@ let props = defineProps<{
   id: string
   type: string
   otherProps: Array<string>
+  expandedCrate: any[]
   fullCrateJson: string | null
 }>()
 
