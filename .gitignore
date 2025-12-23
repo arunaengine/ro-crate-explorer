@@ -14,6 +14,10 @@ dist-ssr
 coverage
 *.local
 
+# Environment files
+# .env, .env.stateless, and .env.stateful are tracked as examples
+# Use .env.local for local overrides (automatically ignored by *.local)
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

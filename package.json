@@ -8,9 +8,15 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:stateless": "vite --mode stateless",
+    "dev:stateful": "vite --mode stateful",
     "build": "run-p type-check \"build-only {@}\" --",
+    "build:stateless": "run-p type-check build-only:stateless",
+    "build:stateful": "run-p type-check build-only:stateful",
     "preview": "vite preview",
     "build-only": "vite build",
+    "build-only:stateless": "vite build --mode stateless",
+    "build-only:stateful": "vite build --mode stateful",
     "type-check": "vue-tsc --build",
     "format": "prettier --write --experimental-cli src/"
   },
@@ -19,6 +25,7 @@
     "@vueuse/core": "^14.1.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "fuse.js": "^7.1.0",
     "jsonld": "^9.0.0",
     "jszip": "^3.10.1",
     "lucide-vue-next": "^0.555.0",

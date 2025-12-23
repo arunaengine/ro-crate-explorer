@@ -2,8 +2,9 @@
 import RoCrateEntity from "@/components/custom-ui/RoCrateEntity.vue";
 import FileTreeItem from "@/components/custom-ui/FileTreeItem.vue";
 import { ROCrate } from "ro-crate";
-import { onMounted, ref, computed } from "vue";
+import { onMounted, onUnmounted, ref, computed } from "vue";
 import { Button } from "@/components/ui/button";
+import { fetchCrateFromUrl, loadCrateFromFile } from '@/services/crateLoader';
 
 import {
   AlertDialog,
@@ -25,8 +26,10 @@ import {
 import arunaBg from "@/assets/aruna-background.jpeg";
 
 import * as jsonld from "jsonld";
+import { config } from "@/config";
+import { buildSearchIndex, localSearch, clearSearchIndex, addToIndex } from "@/services/searchService";
 
-const INDEXING_SERVICE_BASE_URL = "http://localhost:3000";
+const INDEXING_SERVICE_BASE_URL = config.indexingServiceUrl;
 
 interface TreeNode {
   name: string;
@@ -340,6 +343,8 @@ const processCrateData = async (
   sourceUrl: string | null = null
 ) => {
   try {
+    const isSubcrate = historyStack.value.length > 0;
+
     allEntities.value = [];
     selectedEntityId.value = "./";
     selectedEntityData.value = null;
@@ -349,6 +354,15 @@ const processCrateData = async (
     allEntities.value = json["@graph"] || [];
     fullCrateJson.value = JSON.stringify(json, null, 2);
     currentUrl.value = sourceUrl;
+
+    // Build or add to search index
+    if (isSubcrate) {
+      // Add subcrate entities to existing index
+      addToIndex(allEntities.value, currentUrl.value || 'subcrate');
+    } else {
+      // Build fresh index for primary crate
+      buildSearchIndex(allEntities.value, currentUrl.value || 'primary');
+    }
 
     try {
       const expanded = await jsonld.expand(json);
@@ -413,6 +427,28 @@ const loadFromUrl = async () => {
   try {
     const fetchUrl = inputUrl.value;
 
+    // Stateless mode: fetch directly without indexing service
+    if (config.isStateless) {
+      const json = await fetchCrateFromUrl(fetchUrl);
+      fullCrateJson.value = JSON.stringify(json, null, 2);
+      currentUrl.value = fetchUrl;
+
+      // Set baseUrl for subcrate navigation
+      try {
+        const urlObj = new URL(fetchUrl);
+        urlObj.pathname = urlObj.pathname.endsWith("/")
+          ? urlObj.pathname
+          : urlObj.pathname + "/";
+        baseUrl.value = urlObj.href;
+      } catch (e) {
+        baseUrl.value = fetchUrl.endsWith("/") ? fetchUrl : fetchUrl + "/";
+      }
+
+      await processCrateData(json, "Remote Crate", fetchUrl);
+      return;
+    }
+
+    // Stateful mode: use indexing service
     const summaryResponse = await fetch(`${INDEXING_SERVICE_BASE_URL}/crates/url`, {
       method: "POST",
       headers: {
@@ -515,6 +551,17 @@ const handleFileUpload = async (event: Event) => {
   baseUrl.value = "";
 
   try {
+    // Stateless mode: load file directly without indexing service
+    if (config.isStateless) {
+      const json = await loadCrateFromFile(file);
+      fullCrateJson.value = JSON.stringify(json, null, 2);
+      currentUrl.value = file.name;
+
+      await processCrateData(json, file.name, null);
+      return;
+    }
+
+    // Stateful mode: use indexing service
     const formData = new FormData();
     formData.append("file", file);
 
@@ -558,37 +605,52 @@ const runSearch = async () => {
   hasSearched.value = true; // Set to true right before running search
 
   try {
-    // Construct the URL with query parameters 'q' and 'limit'
     const limit = 50; // Set a reasonable limit for displayed results
-    const queryParams = new URLSearchParams({
-      q: searchInput.value,
-      limit: String(limit),
-    }).toString();
 
-    const searchUrl = `${INDEXING_SERVICE_BASE_URL}/search?${queryParams}`;
-
-    const response = await fetch(searchUrl, {
-      method: "GET", // Use GET method
-      headers: {
-        Accept: "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Search failed (${response.status}): ${errText}`);
-    }
-
-    const data = await response.json();
-
-    if (!(data && Array.isArray(data.hits))) {
-      // If 'data' is null, not an object, or 'hits' isn't an array, throw the error.
-      throw new Error(
-        "Invalid search response format. Expected an object with a 'hits' array."
-      );
+    // In stateless mode, always use local search
+    if (config.isStateless) {
+      const results = localSearch(searchInput.value, limit);
+      searchResults.value = results.map(r => r.entityId);
     } else {
-      // Map the array of hit objects to an array of entity_id strings
-      searchResults.value = data.hits.map((hit: any) => hit.entity_id);
+      // In stateful mode, try remote search first, fall back to local on error
+      try {
+        // Construct the URL with query parameters 'q' and 'limit'
+        const queryParams = new URLSearchParams({
+          q: searchInput.value,
+          limit: String(limit),
+        }).toString();
+
+        const searchUrl = `${INDEXING_SERVICE_BASE_URL}/search?${queryParams}`;
+
+        const response = await fetch(searchUrl, {
+          method: "GET", // Use GET method
+          headers: {
+            Accept: "application/json",
+          },
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`Search failed (${response.status}): ${errText}`);
+        }
+
+        const data = await response.json();
+
+        if (!(data && Array.isArray(data.hits))) {
+          // If 'data' is null, not an object, or 'hits' isn't an array, throw the error.
+          throw new Error(
+            "Invalid search response format. Expected an object with a 'hits' array."
+          );
+        } else {
+          // Map the array of hit objects to an array of entity_id strings
+          searchResults.value = data.hits.map((hit: any) => hit.entity_id);
+        }
+      } catch (remoteError: any) {
+        // Fallback to local search if remote search fails
+        console.warn('Remote search failed, falling back to local search:', remoteError.message);
+        const results = localSearch(searchInput.value, limit);
+        searchResults.value = results.map(r => r.entityId);
+      }
     }
   } catch (e: any) {
     searchErrorMsg.value = e.message;
@@ -625,7 +687,7 @@ const handleSelectLink = (entityId: string) => {
   }
 };
 
-const handleSubcrateOpen = (subcrateId: string) => {
+const handleSubcrateOpen = async (subcrateId: string) => {
   if (!baseUrl.value) {
     // Using console.error instead of alert per instructions
     console.error("Cannot determine the base crate identifier for subcrate navigation.");
@@ -673,9 +735,28 @@ const handleSubcrateOpen = (subcrateId: string) => {
   isLoading.value = true;
   errorMsg.value = null;
 
-  fetchMetadata(apiCrateId, "Subcrate", baseUrl.value).finally(() => {
+  try {
+    // Stateless mode: fetch directly without indexing service
+    if (config.isStateless) {
+      // Construct the full URL to the subcrate's ro-crate-metadata.json
+      let fetchUrl = apiCrateId;
+      if (!fetchUrl.toLowerCase().endsWith("ro-crate-metadata.json")) {
+        fetchUrl = fetchUrl.endsWith("/")
+          ? fetchUrl + "ro-crate-metadata.json"
+          : fetchUrl + "/ro-crate-metadata.json";
+      }
+
+      const json = await fetchCrateFromUrl(fetchUrl);
+      await processCrateData(json, "Subcrate", baseUrl.value);
+    } else {
+      // Stateful mode: use indexing service
+      await fetchMetadata(apiCrateId, "Subcrate", baseUrl.value);
+    }
+  } catch (e: any) {
+    errorMsg.value = `Error loading subcrate: ${e.message}`;
+  } finally {
     isLoading.value = false;
-  });
+  }
 };
 
 const goToBreadcrumb = (index: number) => {
@@ -715,6 +796,9 @@ const resetApp = () => {
   searchResults.value = [];
   searchErrorMsg.value = null;
   hasSearched.value = false;
+
+  // Clear the search index
+  clearSearchIndex();
 };
 
 onMounted(() => {
@@ -746,6 +830,12 @@ onMounted(() => {
   } else {
     isDark.value = true;
     document.documentElement.classList.add("dark");
+  }
+});
+
+onUnmounted(() => {
+  if (shareToastTimeout) {
+    clearTimeout(shareToastTimeout);
   }
 });
 
