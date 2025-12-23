@@ -111,6 +111,15 @@ let shareToastTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const SHARE_URL_LIMIT = 8000;
 
+// Computed property to check if crate is too large to share
+const isCrateTooLargeToShare = computed(() => {
+  if (!fullCrateJson.value) return false;
+  // Estimate URL length: base URL + "?crate=" + JSON content
+  // Use a conservative estimate for the base URL overhead
+  const estimatedLength = 100 + fullCrateJson.value.length;
+  return estimatedLength > SHARE_URL_LIMIT;
+});
+
 // --- Search State ---
 const isSearchOverlayOpen = ref(false);
 const searchInput = ref<string>("");
@@ -493,65 +502,22 @@ const processCrateData = async (
   }
 };
 
-// Compute breadcrumbs based on URL hierarchy from root crate
+// Update breadcrumbs - only clears when at root crate, otherwise preserves navigation history
 const updateBreadcrumbsForCrate = (crateUrl: string | null) => {
+  // If no URL or no root crate set, clear breadcrumbs (fresh start)
   if (!crateUrl || !rootCrateUrl.value) {
     historyStack.value = [];
     return;
   }
 
-  // If we're at the root crate, no breadcrumbs needed
+  // If we're at the root crate, clear breadcrumbs (we're at the top)
   if (crateUrl === rootCrateUrl.value) {
     historyStack.value = [];
     return;
   }
 
-  // Build breadcrumb hierarchy based on URL path
-  // e.g., root/subcrate1/subcrate2/ -> [root, subcrate1]
-  const newStack: HistoryItem[] = [];
-
-  try {
-    const rootUrl = new URL(rootCrateUrl.value);
-    const currentUrlObj = new URL(crateUrl);
-
-    // Get the path difference between root and current
-    const rootPath = rootUrl.pathname.replace(/\/$/, '');
-    const currentPath = currentUrlObj.pathname.replace(/\/$/, '');
-
-    if (currentPath.startsWith(rootPath)) {
-      // Current is a descendant of root
-      const relativePath = currentPath.slice(rootPath.length);
-      const pathParts = relativePath.split('/').filter(p => p);
-
-      // Build hierarchy from root to parent of current
-      let buildPath = rootPath;
-
-      // Add root crate first
-      const rootCached = crateCache.get(rootCrateUrl.value);
-      newStack.push({
-        name: rootCached?.crateName || 'Root',
-        url: rootCrateUrl.value
-      });
-
-      // Add intermediate crates
-      for (let i = 0; i < pathParts.length - 1; i++) {
-        buildPath += '/' + pathParts[i];
-        const intermediatePath = buildPath + '/';
-        const intermediateUrl: string = rootUrl.origin + intermediatePath;
-        const cached = crateCache.get(intermediateUrl);
-
-        newStack.push({
-          name: cached?.crateName || pathParts[i],
-          url: intermediateUrl
-        });
-      }
-    }
-  } catch (e) {
-    // URL parsing failed, fall back to empty breadcrumbs
-    console.warn('Failed to compute breadcrumb hierarchy:', e);
-  }
-
-  historyStack.value = newStack;
+  // Otherwise, preserve the existing history stack - it's managed by handleSubcrateOpen
+  // and goBack/goToBreadcrumb functions
 };
 
 const fetchMetadata = async (
@@ -588,13 +554,13 @@ const loadFromUrl = async () => {
   if (!inputUrl.value) return;
   errorMsg.value = null;
 
-  // Determine if this is the first crate load (empty history = fresh start)
-  const isFirstCrate = historyStack.value.length === 0;
+  // Determine if this is the first crate load (no root crate set yet)
+  const isFirstCrate = rootCrateUrl.value === null;
   const fetchUrl = inputUrl.value;
 
   // Check cache first for faster navigation (no loading screen needed)
   const cachedCrate = crateCache.get(fetchUrl);
-  if (cachedCrate) {
+  if (cachedCrate && cachedCrate.json) {
     console.log("Using cached crate for:", fetchUrl);
 
     // Set baseUrl for subcrate navigation
@@ -608,7 +574,7 @@ const loadFromUrl = async () => {
       baseUrl.value = fetchUrl.endsWith("/") ? fetchUrl : fetchUrl + "/";
     }
 
-    await processCrateData(cachedCrate, "Remote Crate (Cached)", fetchUrl, isFirstCrate);
+    await processCrateData(cachedCrate.json, "Remote Crate (Cached)", fetchUrl, isFirstCrate);
     return;
   }
 
@@ -916,9 +882,14 @@ const handleSubcrateOpen = async (subcrateId: string) => {
     return;
   }
 
-  // Preserve the current state for history navigation
-  const currentHistoryUrl = currentUrl.value || baseUrl.value;
-  historyStack.value.push({ name: currentCrateName.value, url: currentHistoryUrl });
+  // Push current crate onto history stack BEFORE navigating to subcrate
+  // This ensures the breadcrumb hierarchy is maintained
+  if (currentUrl.value || baseUrl.value) {
+    historyStack.value.push({
+      name: currentCrateName.value,
+      url: currentUrl.value || baseUrl.value
+    });
+  }
 
   // Resolve the subcrate ID to a full URL (handling both absolute and relative paths)
   let resolvedUrl: string;
@@ -975,7 +946,7 @@ const handleSubcrateOpen = async (subcrateId: string) => {
   const cacheKey = subcrateBaseUrl.endsWith("/") ? subcrateBaseUrl : subcrateBaseUrl + "/";
   const cachedCrate = crateCache.get(cacheKey);
 
-  if (cachedCrate && config.isStateless) {
+  if (cachedCrate && cachedCrate.json && config.isStateless) {
     console.log("Using cached subcrate for:", cacheKey);
 
     // Update state for cached subcrate
@@ -983,7 +954,7 @@ const handleSubcrateOpen = async (subcrateId: string) => {
     inputUrl.value = subcrateBaseUrl;
     currentUrl.value = baseUrl.value;
 
-    await processCrateData(cachedCrate, "Subcrate (Cached)", baseUrl.value);
+    await processCrateData(cachedCrate.json, "Subcrate (Cached)", baseUrl.value);
     return;
   }
 
@@ -1032,8 +1003,6 @@ const handleSubcrateOpen = async (subcrateId: string) => {
     }
   } catch (e: any) {
     errorMsg.value = `Error loading subcrate: ${e.message}`;
-    // Restore previous state by popping the history entry we just added
-    historyStack.value.pop();
   } finally {
     isLoading.value = false;
   }
@@ -1043,16 +1012,20 @@ const goToBreadcrumb = (index: number) => {
   const target = historyStack.value[index];
   if (!target || !target.url) return;
 
+  // Truncate history stack to items before the clicked breadcrumb
+  // e.g., clicking on index 1 means we keep items 0 (items before index 1)
   historyStack.value = historyStack.value.slice(0, index);
+
   inputUrl.value = target.url;
   loadFromUrl();
 };
 
 const goBack = () => {
   if (historyStack.value.length === 0) return;
-  const previous = historyStack.value.pop();
-  if (previous && previous.url) {
-    inputUrl.value = previous.url;
+  // Pop the last breadcrumb (parent crate) and navigate to it
+  const parent = historyStack.value.pop();
+  if (parent && parent.url) {
+    inputUrl.value = parent.url;
     loadFromUrl();
   }
 };
@@ -1077,8 +1050,9 @@ const resetApp = () => {
   searchErrorMsg.value = null;
   hasSearched.value = false;
 
-  // Clear the crate cache
+  // Clear the crate cache and root URL
   crateCache.clear();
+  rootCrateUrl.value = null;
 
   // Clear the search index
   clearSearchIndex();
@@ -1217,8 +1191,8 @@ const copyShareLink = async () => {
             size="sm"
             class="h-9 px-3 rounded-full border border-(--c-border) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main)"
             @click="copyShareLink"
-            :disabled="!fullCrateJson"
-            title="Copy a shareable URL with the current crate embedded"
+            :disabled="!fullCrateJson || isCrateTooLargeToShare"
+            :title="isCrateTooLargeToShare ? 'Crate is too large to share via URL' : 'Copy a shareable URL with the current crate embedded'"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
