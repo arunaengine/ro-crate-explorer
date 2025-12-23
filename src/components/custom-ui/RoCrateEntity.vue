@@ -252,25 +252,25 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
 
 <template>
   <Card
-    class="w-full min-w-0 flex flex-col h-full overflow-hidden shadow-sm bg-[var(--c-bg-card)] border border-[var(--c-border)] rounded-lg transition-colors duration-300"
+    class="w-full min-w-0 flex flex-col h-full overflow-hidden shadow-sm bg-(--c-bg-card) border border-(--c-border) rounded-lg transition-colors duration-300"
   >
-    <CardHeader class="p-3 border-b border-[var(--c-border)] flex-shrink-0">
+    <CardHeader class="p-3 border-b border-(--c-border) shrink-0">
       <div class="flex justify-between items-start gap-4">
         <div class="min-w-0 flex-1">
           <CardDescription class="text-xs font-bold uppercase tracking-wider text-[#00A0CC] mb-0.5">
             {{ type }}
           </CardDescription>
-          <CardTitle class="text-lg text-[var(--c-text-main)] break-all leading-tight font-medium">
+          <CardTitle class="text-lg text-(--c-text-main) break-all leading-tight font-medium">
             {{ id }}
           </CardTitle>
         </div>
-        <CardAction class="flex-shrink-0">
+        <CardAction class="shrink-0">
           <AlertDialog>
             <AlertDialogTrigger as-child>
               <Button
                 variant="ghost"
                 size="sm"
-                class="h-8 w-8 p-0 text-[var(--c-text-muted)] hover:text-[var(--c-text-main)] hover:bg-[var(--c-hover)]"
+                class="h-8 w-8 p-0 text-(--c-text-muted) hover:text-(--c-text-main) hover:bg-(--c-hover)"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
@@ -293,17 +293,17 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
               </Button>
             </AlertDialogTrigger>
             <AlertDialogContent
-              class="text-[var(--c-text-muted)] bg-[var(--c-bg-card)] border-[var(--c-border)] !max-w-4xl max-h-[80vh] overflow-y-auto"
+              class="text-(--c-text-muted) bg-(--c-bg-card) border-(--c-border) max-w-4xl! max-h-[80vh] overflow-y-auto"
             >
               <AlertDialogHeader>
                 <div class="flex items-center justify-between flex-wrap gap-2">
-                  <AlertDialogTitle class="text-[var(--c-text-main)]">Raw JSON-LD</AlertDialogTitle>
+                  <AlertDialogTitle class="text-(--c-text-main)">Raw JSON-LD</AlertDialogTitle>
 
                   <div class="flex items-center gap-2">
                     <Button
                       variant="outline"
                       size="sm"
-                      class="h-8 border-[var(--c-border)] bg-[var(--c-bg-app)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)] flex items-center gap-2"
+                      class="h-8 border-(--c-border) bg-(--c-bg-app) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main) flex items-center gap-2"
                       @click="downloadRawJson"
                       title="Download as JSON file"
                     >
@@ -328,7 +328,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                     <Button
                       variant="outline"
                       size="sm"
-                      class="h-8 border-[var(--c-border)] bg-[var(--c-bg-app)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)] flex items-center gap-2"
+                      class="h-8 border-(--c-border) bg-(--c-bg-app) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main) flex items-center gap-2"
                       @click="copyRawJson"
                     >
                       <span v-if="!isCopied" class="flex items-center gap-2">
@@ -367,7 +367,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                     </Button>
 
                     <AlertDialogCancel
-                      class="h-8 w-8 p-0 border border-[var(--c-border)] bg-[var(--c-bg-app)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)] flex items-center justify-center rounded-sm transition-colors mt-0"
+                      class="h-8 w-8 p-0 border border-(--c-border) bg-(--c-bg-app) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main) flex items-center justify-center rounded-sm transition-colors mt-0"
                     >
                       <svg
                         xmlns="http://www.w3.org/2000/svg"
@@ -387,13 +387,13 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                     </AlertDialogCancel>
                   </div>
                 </div>
-                <AlertDialogDescription class="text-[var(--c-text-muted)]/60"
+                <AlertDialogDescription class="text-(--c-text-muted)/60"
                   >Full source representation.</AlertDialogDescription
                 >
               </AlertDialogHeader>
 
               <pre
-                class="whitespace-pre-wrap text-xs bg-[var(--c-bg-app)] text-[var(--c-text-muted)] p-4 rounded-md font-mono overflow-x-auto border border-[var(--c-border)]"
+                class="whitespace-pre-wrap text-xs bg-(--c-bg-app) text-(--c-text-muted) p-4 rounded-md font-mono overflow-x-auto border border-(--c-border)"
                 v-html="highlightedJson"
               ></pre>
 
@@ -412,10 +412,10 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
       <div
         v-for="(propString, index) in props.otherProps"
         :key="index"
-        class="flex flex-col sm:flex-row border-b border-[var(--c-border)] last:border-0 hover:bg-[var(--c-hover)] transition-colors group"
+        class="flex flex-col sm:flex-row border-b border-(--c-border) last:border-0 hover:bg-(--c-hover) transition-colors group"
       >
         <div
-          class="w-full sm:w-1/4 min-w-[120px] p-3 text-sm font-semibold text-[var(--c-text-muted)] bg-[var(--c-bg-app)]/50 break-words flex items-center gap-2"
+          class="w-full sm:w-1/4 min-w-[120px] p-3 text-sm font-semibold text-(--c-text-muted) bg-(--c-bg-app)/50 wrap-break-word flex items-center gap-2"
         >
           <span class="truncate">{{ getKey(propString) }}</span>
           <a
@@ -423,7 +423,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
             :href="propIri(getKey(propString))"
             target="_blank"
             rel="noopener noreferrer"
-            class="text-[var(--c-text-muted)] hover:text-[#00A0CC]"
+            class="text-(--c-text-muted) hover:text-[#00A0CC]"
             title="View expanded property IRI"
           >
             <svg
@@ -445,7 +445,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
           </a>
         </div>
 
-        <div class="w-full sm:w-3/4 p-3 text-sm text-[var(--c-text-muted)] break-words min-w-0">
+        <div class="w-full sm:w-3/4 p-3 text-sm text-(--c-text-muted) wrap-break-word min-w-0">
           <template
             v-if="typeof getValue(propString) === 'object' && getValue(propString) !== null"
           >
@@ -460,14 +460,14 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                     isSubcrateLink(getKey(propString), item) ||
                     isStructuralSubcrate(getKey(propString), item)
                   "
-                  class="flex items-center gap-2 p-2 bg-[var(--c-bg-app)] rounded border border-[var(--c-border)]"
+                  class="flex items-center gap-2 p-2 bg-(--c-bg-app) rounded border border-(--c-border)"
                 >
                   <span class="text-[#00A0CC] font-medium break-all flex-1 min-w-0">{{
                     item['@id']
                   }}</span>
                   <Button
                     size="sm"
-                    class="bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white flex-shrink-0 h-7 text-xs whitespace-nowrap"
+                    class="bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white shrink-0 h-7 text-xs whitespace-nowrap"
                     @click="onSubcrateOpen(item['@id'])"
                   >
                     Explore Subcrate
@@ -494,11 +494,11 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                   class="flex flex-wrap items-center gap-2"
                 >
                   <div
-                    class="inline-flex items-center bg-[var(--c-hover)]/40 border border-[var(--c-border)] rounded-md overflow-hidden max-w-full hover:bg-[var(--c-hover)] transition-colors group/pill"
+                    class="inline-flex items-center bg-(--c-hover)/40 border border-(--c-border) rounded-md overflow-hidden max-w-full hover:bg-(--c-hover) transition-colors group/pill"
                   >
                     <Button
                       variant="ghost"
-                      class="h-auto py-1 px-2 text-[#00A0CC] group-hover/pill:text-[var(--c-text-main)] break-all text-left font-normal whitespace-normal rounded-none"
+                      class="h-auto py-1 px-2 text-[#00A0CC] group-hover/pill:text-(--c-text-main) break-all text-left font-normal whitespace-normal rounded-none"
                       @click="onLinkClick(item['@id'])"
                       title="View Entity Details (Internal)"
                     >
@@ -522,13 +522,13 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                     </Button>
                     <template v-if="isUrl(item['@id'])">
                       <div
-                        class="w-px h-4 bg-[var(--c-border)] mx-0 group-hover/pill:bg-[#00A0CC]/30"
+                        class="w-px h-4 bg-(--c-border) mx-0 group-hover/pill:bg-[#00A0CC]/30"
                       ></div>
                       <a
                         :href="item['@id']"
                         target="_blank"
                         rel="noopener noreferrer"
-                        class="px-2 py-1 text-[var(--c-text-muted)] hover:text-[#00A0CC] hover:bg-[var(--c-bg-app)] transition-colors flex items-center h-full"
+                        class="px-2 py-1 text-(--c-text-muted) hover:text-[#00A0CC] hover:bg-(--c-bg-app) transition-colors flex items-center h-full"
                         title="Open External Source"
                       >
                         <svg
@@ -551,7 +551,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                   </div>
                   <span
                     v-if="item['@type']"
-                    class="text-xs text-[var(--c-text-muted)]/80 border border-[var(--c-border)] px-1 rounded bg-[var(--c-bg-app)] whitespace-nowrap"
+                    class="text-xs text-(--c-text-muted)/80 border border-(--c-border) px-1 rounded bg-(--c-bg-app) whitespace-nowrap"
                   >
                     {{ Array.isArray(item['@type']) ? item['@type'][0] : item['@type'] }}
                   </span>
@@ -562,7 +562,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                     :href="item['@id']"
                     target="_blank"
                     rel="noopener noreferrer"
-                    class="text-[var(--c-text-muted)] hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
+                    class="text-(--c-text-muted) hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
                   >
                     {{ item['@id'] }}
                     <svg
@@ -584,7 +584,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                   </a>
                   <span
                     v-if="item['@type']"
-                    class="text-xs text-[var(--c-text-muted)]/40 border border-[var(--c-border)] px-1 rounded bg-[var(--c-bg-app)] whitespace-nowrap"
+                    class="text-xs text-(--c-text-muted)/40 border border-(--c-border) px-1 rounded bg-(--c-bg-app) whitespace-nowrap"
                   >
                     {{ Array.isArray(item['@type']) ? item['@type'][0] : item['@type'] }}
                   </span>
@@ -598,7 +598,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                     :href="valueIri(getKey(propString), i)"
                     target="_blank"
                     rel="noopener noreferrer"
-                    class="text-[var(--c-text-muted)] hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
+                    class="text-(--c-text-muted) hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
                   >
                     {{ valueIri(getKey(propString), i) }}
                     <svg
@@ -626,7 +626,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
 
                 <div
                   v-else
-                  class="bg-[var(--c-bg-app)] p-2 rounded text-xs font-mono overflow-x-auto border border-[var(--c-border)]"
+                  class="bg-(--c-bg-app) p-2 rounded text-xs font-mono overflow-x-auto border border-(--c-border)"
                 >
                   {{ JSON.stringify(item, null, 2) }}
                 </div>
@@ -640,7 +640,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                 :href="getValue(propString)"
                 target="_blank"
                 rel="noopener noreferrer"
-                class="text-[var(--c-text-muted)] hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
+                class="text-(--c-text-muted) hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
               >
                 {{ getValue(propString) }}
                 <svg
@@ -669,7 +669,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                 :href="valueIri(getKey(propString), 0)"
                 target="_blank"
                 rel="noopener noreferrer"
-                class="text-[var(--c-text-muted)] hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
+                class="text-(--c-text-muted) hover:text-[#00A0CC] hover:underline break-all flex items-center gap-1.5"
               >
                 {{ valueIri(getKey(propString), 0) }}
                 <svg
@@ -690,7 +690,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                 </svg>
               </a>
             </div>
-            <span v-else class="whitespace-pre-wrap break-words">
+            <span v-else class="whitespace-pre-wrap wrap-break-word">
               {{ getValue(propString) }}
             </span>
           </template>
@@ -699,7 +699,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
     </CardContent>
 
     <CardFooter
-      class="p-2 text-[10px] text-[var(--c-text-muted)]/40 justify-center border-t border-[var(--c-border)] flex-shrink-0"
+      class="p-2 text-[10px] text-(--c-text-muted)/40 justify-center border-t border-(--c-border) shrink-0"
     >
       Proudly presented by the team of Project 3
     </CardFooter>

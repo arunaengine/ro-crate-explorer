@@ -698,39 +698,47 @@ const handleSubcrateOpen = async (subcrateId: string) => {
   const currentHistoryUrl = currentUrl.value || baseUrl.value;
   historyStack.value.push({ name: currentCrateName.value, url: currentHistoryUrl });
 
-  let apiCrateId = subcrateId;
-
+  // Resolve the subcrate ID to a full URL (handling both absolute and relative paths)
+  let resolvedUrl: string;
   try {
     const fullUrl = new URL(subcrateId, baseUrl.value);
+    resolvedUrl = fullUrl.href;
+  } catch (e) {
+    // If URL construction fails, use the subcrateId as-is
+    resolvedUrl = subcrateId;
+  }
 
-    if (fullUrl.pathname.toLowerCase().endsWith("ro-crate-metadata.json")) {
-      const pathParts = fullUrl.pathname.split("/");
+  // Normalize the URL by removing ro-crate-metadata.json if present
+  // This gives us the directory URL which serves as the base for subcrate navigation
+  let subcrateBaseUrl: string;
+  try {
+    const urlObj = new URL(resolvedUrl);
+    if (urlObj.pathname.toLowerCase().endsWith("ro-crate-metadata.json")) {
+      const pathParts = urlObj.pathname.split("/");
       pathParts.pop();
-
-      fullUrl.pathname = pathParts.join("/");
-
-      if (!fullUrl.pathname.endsWith("/")) {
-        fullUrl.pathname += "/";
+      urlObj.pathname = pathParts.join("/");
+      if (!urlObj.pathname.endsWith("/")) {
+        urlObj.pathname += "/";
       }
-
-      apiCrateId = fullUrl.href;
+      subcrateBaseUrl = urlObj.href;
+    } else {
+      // If it doesn't end with the metadata filename, ensure trailing slash
+      subcrateBaseUrl = resolvedUrl.endsWith("/") ? resolvedUrl : resolvedUrl + "/";
     }
   } catch (e) {
+    // Fallback for non-URL strings
     const filenameRegex = /[\/\\]ro-crate-metadata\.json$/i;
-    if (filenameRegex.test(apiCrateId)) {
-      apiCrateId = apiCrateId.replace(filenameRegex, "");
+    if (filenameRegex.test(resolvedUrl)) {
+      subcrateBaseUrl = resolvedUrl.replace(filenameRegex, "/");
+    } else {
+      subcrateBaseUrl = resolvedUrl.endsWith("/") ? resolvedUrl : resolvedUrl + "/";
     }
   }
 
-  if (apiCrateId === "") apiCrateId = ".";
-
-  // FIX: Redefine baseUrl to the ID of the subcrate we just navigated to.
-  // This is crucial for resolving subsequent relative paths correctly.
-  baseUrl.value = apiCrateId.endsWith("/") ? apiCrateId : apiCrateId + "/";
-
-  // Update inputUrl (for future loadFromUrl calls) and currentUrl (for display)
-  inputUrl.value = apiCrateId;
-  currentUrl.value = baseUrl.value; // Use the new base URL for history tracking
+  // Special case: empty path becomes "."
+  if (subcrateBaseUrl === "") {
+    subcrateBaseUrl = ".";
+  }
 
   isLoading.value = true;
   errorMsg.value = null;
@@ -739,21 +747,46 @@ const handleSubcrateOpen = async (subcrateId: string) => {
     // Stateless mode: fetch directly without indexing service
     if (config.isStateless) {
       // Construct the full URL to the subcrate's ro-crate-metadata.json
-      let fetchUrl = apiCrateId;
-      if (!fetchUrl.toLowerCase().endsWith("ro-crate-metadata.json")) {
-        fetchUrl = fetchUrl.endsWith("/")
-          ? fetchUrl + "ro-crate-metadata.json"
-          : fetchUrl + "/ro-crate-metadata.json";
+      let fetchUrl: string;
+      if (subcrateBaseUrl === ".") {
+        fetchUrl = "ro-crate-metadata.json";
+      } else if (subcrateBaseUrl.toLowerCase().endsWith("ro-crate-metadata.json")) {
+        // Already has the filename (shouldn't happen due to normalization above, but defensive)
+        fetchUrl = subcrateBaseUrl;
+      } else {
+        // Append the metadata filename
+        fetchUrl = subcrateBaseUrl.endsWith("/")
+          ? subcrateBaseUrl + "ro-crate-metadata.json"
+          : subcrateBaseUrl + "/ro-crate-metadata.json";
       }
 
       const json = await fetchCrateFromUrl(fetchUrl);
+
+      // Only update baseUrl after successful fetch to avoid inconsistent state on errors
+      baseUrl.value = subcrateBaseUrl.endsWith("/") ? subcrateBaseUrl : subcrateBaseUrl + "/";
+      inputUrl.value = subcrateBaseUrl;
+      currentUrl.value = baseUrl.value;
+
       await processCrateData(json, "Subcrate", baseUrl.value);
     } else {
       // Stateful mode: use indexing service
+      // The indexing service expects directory URLs without trailing slash
+      const apiCrateId = subcrateBaseUrl.endsWith("/")
+        ? subcrateBaseUrl.slice(0, -1)
+        : subcrateBaseUrl;
+
+      // Update state before fetch for stateful mode (consistent with original behavior)
+      baseUrl.value = subcrateBaseUrl.endsWith("/") ? subcrateBaseUrl : subcrateBaseUrl + "/";
+      inputUrl.value = subcrateBaseUrl;
+      currentUrl.value = baseUrl.value;
+
+      // Fetch metadata (this calls processCrateData internally)
       await fetchMetadata(apiCrateId, "Subcrate", baseUrl.value);
     }
   } catch (e: any) {
     errorMsg.value = `Error loading subcrate: ${e.message}`;
+    // Restore previous state by popping the history entry we just added
+    historyStack.value.pop();
   } finally {
     isLoading.value = false;
   }
@@ -888,7 +921,7 @@ const copyShareLink = async () => {
 
 <template>
   <div
-    class="flex flex-col min-h-screen pb-10 relative isolate bg-[var(--c-bg-app)] text-[var(--c-text-muted)] transition-colors duration-300"
+    class="flex flex-col min-h-screen pb-10 relative isolate bg-(--c-bg-app) text-(--c-text-muted) transition-colors duration-300"
   >
     <img
       :src="arunaBg"
@@ -897,11 +930,11 @@ const copyShareLink = async () => {
     />
 
     <div
-      class="w-full border-b border-[var(--c-border)] bg-[var(--c-bg-card)]/90 backdrop-blur-sm shadow-sm flex justify-center px-4 md:px-6 transition-colors duration-300"
+      class="w-full border-b border-(--c-border) bg-(--c-bg-card)/90 backdrop-blur-sm shadow-sm flex justify-center px-4 md:px-6 transition-colors duration-300"
     >
       <div class="w-full max-w-[1600px] py-4 flex justify-between items-center">
         <h1
-          class="text-3xl font-light text-[var(--c-text-main)] cursor-pointer select-none hover:text-[#00A0CC] transition-colors"
+          class="text-3xl font-light text-(--c-text-main) cursor-pointer select-none hover:text-[#00A0CC] transition-colors"
           @click="resetApp"
         >
           RO-Crate Explorer
@@ -911,7 +944,7 @@ const copyShareLink = async () => {
             v-if="allEntities.length > 0"
             variant="ghost"
             size="sm"
-            class="h-9 px-3 rounded-full border border-[var(--c-border)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)]"
+            class="h-9 px-3 rounded-full border border-(--c-border) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main)"
             @click="copyShareLink"
             :disabled="!fullCrateJson"
             title="Copy a shareable URL with the current crate embedded"
@@ -939,7 +972,7 @@ const copyShareLink = async () => {
             v-if="allEntities.length > 0"
             variant="ghost"
             size="sm"
-            class="h-9 w-9 p-0 rounded-full border border-[var(--c-border)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)]"
+            class="h-9 w-9 p-0 rounded-full border border-(--c-border) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main)"
             @click="isSearchOverlayOpen = true"
             title="Search Crate"
           >
@@ -962,7 +995,7 @@ const copyShareLink = async () => {
           <Button
             variant="ghost"
             size="sm"
-            class="h-9 w-9 p-0 rounded-full border border-[var(--c-border)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)]"
+            class="h-9 w-9 p-0 rounded-full border border-(--c-border) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main)"
             @click="toggleTheme"
           >
             <svg
@@ -1006,7 +1039,7 @@ const copyShareLink = async () => {
             v-if="allEntities.length > 0"
             variant="secondary"
             size="sm"
-            class="bg-[var(--c-hover)] text-[var(--c-text-main)] hover:bg-[#00A0CC] hover:text-white border border-[var(--c-border)]"
+            class="bg-(--c-hover) text-(--c-text-main) hover:bg-[#00A0CC] hover:text-white border border-(--c-border)"
             @click="resetApp"
           >
             Load New Crate
@@ -1015,7 +1048,7 @@ const copyShareLink = async () => {
       </div>
     </div>
 
-    <div class="flex-grow w-full px-4 md:px-6 pt-6 flex flex-col items-center">
+    <div class="grow w-full px-4 md:px-6 pt-6 flex flex-col items-center">
       <div
         v-if="errorMsg"
         class="w-full max-w-4xl bg-red-900/20 border border-red-800 text-red-400 px-4 py-3 rounded mb-6"
@@ -1026,28 +1059,28 @@ const copyShareLink = async () => {
 
       <div
         v-if="allEntities.length === 0 && !isLoading"
-        class="flex-grow flex flex-col items-center justify-center w-full max-w-5xl"
+        class="grow flex flex-col items-center justify-center w-full max-w-5xl"
       >
         <Card
-          class="w-full max-w-xl shadow-xl bg-[var(--c-bg-card)] border-[var(--c-border)]"
+          class="w-full max-w-xl shadow-xl bg-(--c-bg-card) border-(--c-border)"
         >
           <CardHeader>
-            <CardTitle class="text-2xl text-center text-[var(--c-text-main)]"
+            <CardTitle class="text-2xl text-center text-(--c-text-main)"
               >Load RO-Crate</CardTitle
             >
-            <CardDescription class="text-center text-[var(--c-text-muted)]"
+            <CardDescription class="text-center text-(--c-text-muted)"
               >Paste JSON, provide a URL, or upload a ZIP/JSON file.</CardDescription
             >
           </CardHeader>
           <CardContent class="flex flex-col gap-8 p-8">
             <div class="space-y-2">
               <label
-                class="text-sm font-semibold text-[var(--c-text-muted)] block text-center"
+                class="text-sm font-semibold text-(--c-text-muted) block text-center"
                 >Paste the contents of <code>ro-crate-metadata.json</code></label
               >
               <textarea
                 v-model="pastedCrateText"
-                class="w-full min-h-[180px] rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
+                class="w-full min-h-[180px] rounded-md border border-(--c-border) bg-(--c-bg-app) text-(--c-text-main) px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
                 placeholder='{\n  "@context": "https://w3id.org/ro/crate/1.1/context",\n  "@graph": [ ... ]\n}'
               ></textarea>
               <Button
@@ -1058,10 +1091,10 @@ const copyShareLink = async () => {
             </div>
             <div class="relative">
               <div class="absolute inset-0 flex items-center">
-                <span class="w-full border-t border-[var(--c-border)]" />
+                <span class="w-full border-t border-(--c-border)" />
               </div>
               <div class="relative flex justify-center text-xs uppercase tracking-wider">
-                <span class="bg-[var(--c-bg-card)] px-2 text-[var(--c-text-muted)]/60"
+                <span class="bg-(--c-bg-card) px-2 text-(--c-text-muted)/60"
                   >Or load from URL</span
                 >
               </div>
@@ -1070,7 +1103,7 @@ const copyShareLink = async () => {
               <input
                 v-model="inputUrl"
                 type="text"
-                class="flex h-11 w-full rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
+                class="flex h-11 w-full rounded-md border border-(--c-border) bg-(--c-bg-app) text-(--c-text-main) px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
                 placeholder="https://..."
               />
               <Button
@@ -1081,34 +1114,34 @@ const copyShareLink = async () => {
             </div>
             <div class="relative">
               <div class="absolute inset-0 flex items-center">
-                <span class="w-full border-t border-[var(--c-border)]" />
+                <span class="w-full border-t border-(--c-border)" />
               </div>
               <div class="relative flex justify-center text-xs uppercase tracking-wider">
-                <span class="bg-[var(--c-bg-card)] px-2 text-[var(--c-text-muted)]/60"
+                <span class="bg-(--c-bg-card) px-2 text-(--c-text-muted)/60"
                   >Or upload a file</span
                 >
               </div>
             </div>
             <div class="space-y-3">
               <label
-                class="text-sm font-semibold text-[var(--c-text-muted)] block text-center"
+                class="text-sm font-semibold text-(--c-text-muted) block text-center"
                 >Upload File</label
               >
               <div class="flex items-center justify-center w-full">
                 <label
                   for="dropzone-file"
-                  class="flex flex-col items-center justify-center w-full h-32 border-2 border-[var(--c-border)] border-dashed rounded-lg cursor-pointer bg-[var(--c-bg-app)] hover:bg-[var(--c-hover)] transition-colors group"
+                  class="flex flex-col items-center justify-center w-full h-32 border-2 border-(--c-border) border-dashed rounded-lg cursor-pointer bg-(--c-bg-app) hover:bg-(--c-hover) transition-colors group"
                 >
                   <div
                     class="flex flex-col items-center justify-center pt-5 pb-6 text-center"
                   >
                     <p
-                      class="text-sm text-[var(--c-text-muted)] group-hover:text-[var(--c-text-main)] transition-colors"
+                      class="text-sm text-(--c-text-muted) group-hover:text-(--c-text-main) transition-colors"
                     >
                       <span class="font-semibold text-[#00A0CC]">Click to upload</span> or
                       drag and drop
                     </p>
-                    <p class="text-xs text-[var(--c-text-muted)]/60 mt-1">
+                    <p class="text-xs text-(--c-text-muted)/60 mt-1">
                       .zip archive or .json metadata
                     </p>
                   </div>
@@ -1128,12 +1161,12 @@ const copyShareLink = async () => {
 
       <div
         v-if="isLoading"
-        class="flex-grow flex flex-col items-center justify-center w-full"
+        class="grow flex flex-col items-center justify-center w-full"
       >
         <div
           class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-[#00A0CC] mb-6"
         ></div>
-        <p class="text-xl text-[var(--c-text-muted)] font-light">Processing Crate...</p>
+        <p class="text-xl text-(--c-text-muted) font-light">Processing Crate...</p>
       </div>
 
       <div
@@ -1141,14 +1174,14 @@ const copyShareLink = async () => {
         class="w-full max-w-[1600px] flex flex-col gap-4 h-[80vh]"
       >
         <div
-          class="w-full bg-[var(--c-bg-card)] border border-[var(--c-border)] text-[var(--c-text-muted)] rounded-md p-3 flex items-center gap-4 shadow-sm"
+          class="w-full bg-(--c-bg-card) border border-(--c-border) text-(--c-text-muted) rounded-md p-3 flex items-center gap-4 shadow-sm"
         >
           <Button
             variant="outline"
             size="sm"
             @click="goBack"
             :disabled="historyStack.length === 0"
-            class="flex items-center gap-1 border-[var(--c-border)] bg-[var(--c-bg-app)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)]"
+            class="flex items-center gap-1 border-(--c-border) bg-(--c-bg-app) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main)"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -1165,7 +1198,7 @@ const copyShareLink = async () => {
             </svg>
             Back
           </Button>
-          <nav class="flex items-center flex-wrap text-sm text-[var(--c-text-muted)]">
+          <nav class="flex items-center flex-wrap text-sm text-(--c-text-muted)">
             <template v-for="(item, index) in historyStack" :key="index">
               <button
                 @click="goToBreadcrumb(index)"
@@ -1173,7 +1206,7 @@ const copyShareLink = async () => {
               >
                 {{ item.name }}
               </button>
-              <span class="text-[var(--c-text-muted)]/40 mx-1">/</span>
+              <span class="text-(--c-text-muted)/40 mx-1">/</span>
             </template>
             <span class="font-bold text-[#00A0CC] px-1">{{ currentCrateName }}</span>
           </nav>
@@ -1183,13 +1216,13 @@ const copyShareLink = async () => {
           class="grid grid-cols-1 md:grid-cols-[300px_1fr] gap-6 h-full overflow-hidden pb-2 w-full"
         >
           <aside
-            class="col-span-1 bg-[var(--c-bg-card)] border border-[var(--c-border)] rounded-lg shadow-sm flex flex-col h-full overflow-hidden transition-colors duration-300"
+            class="col-span-1 bg-(--c-bg-card) border border-(--c-border) rounded-lg shadow-sm flex flex-col h-full overflow-hidden transition-colors duration-300"
           >
             <div
-              class="p-3 bg-[var(--c-bg-app)] border-b border-[var(--c-border)] flex-shrink-0"
+              class="p-3 bg-(--c-bg-app) border-b border-(--c-border) shrink-0"
             >
               <h2
-                class="text-xs font-bold text-[var(--c-text-muted)]/80 uppercase tracking-wider"
+                class="text-xs font-bold text-(--c-text-muted)/80 uppercase tracking-wider"
               >
                 Files
               </h2>
@@ -1202,21 +1235,21 @@ const copyShareLink = async () => {
               />
             </div>
             <div
-              class="h-1 bg-[var(--c-bg-app)] border-t border-b border-[var(--c-border)]"
+              class="h-1 bg-(--c-bg-app) border-t border-b border-(--c-border)"
             ></div>
 
             <div
-              class="p-3 bg-[var(--c-bg-app)] border-b border-[var(--c-border)] flex-shrink-0 flex flex-col gap-2"
+              class="p-3 bg-(--c-bg-app) border-b border-(--c-border) shrink-0 flex flex-col gap-2"
             >
               <h2
-                class="text-xs font-bold text-[var(--c-text-muted)]/80 uppercase tracking-wider"
+                class="text-xs font-bold text-(--c-text-muted)/80 uppercase tracking-wider"
               >
                 Context Entities
               </h2>
               <input
                 v-model="contextFilterInput"
                 type="text"
-                class="flex h-7 w-full rounded-md border border-[var(--c-border)] bg-[var(--c-bg-card)] text-[var(--c-text-main)] px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#00A0CC] placeholder:text-gray-500/80"
+                class="flex h-7 w-full rounded-md border border-(--c-border) bg-(--c-bg-card) text-(--c-text-main) px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#00A0CC] placeholder:text-gray-500/80"
                 placeholder="Filter by Type (e.g., Person, Organization)"
               />
             </div>
@@ -1231,16 +1264,16 @@ const copyShareLink = async () => {
                 >
                   {{ groupName }}
                 </h3>
-                <div class="flex flex-col gap-[1px]">
+                <div class="flex flex-col gap-px">
                   <button
                     v-for="entity in entities"
                     :key="entity['@id']"
                     @click="selectEntity(entity['@id'])"
                     :class="[
-                      'text-left px-2 py-1 text-sm rounded-sm hover:bg-[var(--c-hover)] transition-all truncate border-l-2 w-full',
+                      'text-left px-2 py-1 text-sm rounded-sm hover:bg-(--c-hover) transition-all truncate border-l-2 w-full',
                       selectedEntityId === entity['@id']
-                        ? 'bg-[var(--c-hover)] text-[#00A0CC] border-[#00A0CC] font-medium shadow-sm'
-                        : 'text-[var(--c-text-muted)] border-transparent',
+                        ? 'bg-(--c-hover) text-[#00A0CC] border-[#00A0CC] font-medium shadow-sm'
+                        : 'text-(--c-text-muted) border-transparent',
                     ]"
                     :title="entity['@id']"
                   >
@@ -1266,7 +1299,7 @@ const copyShareLink = async () => {
               />
               <div
                 v-else
-                class="h-full flex flex-col items-center justify-center bg-[var(--c-bg-card)] border border-dashed border-[var(--c-border)] rounded-lg text-[var(--c-text-muted)]/50 transition-colors duration-300"
+                class="h-full flex flex-col items-center justify-center bg-(--c-bg-card) border border-dashed border-(--c-border) rounded-lg text-(--c-text-muted)/50 transition-colors duration-300"
               >
                 <p>Select an entity to view details.</p>
               </div>
@@ -1278,10 +1311,10 @@ const copyShareLink = async () => {
 
     <AlertDialog :open="isDetailOverlayOpen" @update:open="isDetailOverlayOpen = $event">
       <AlertDialogContent
-        class="text-[var(--c-text-muted)] bg-[var(--c-bg-card)] border-[var(--c-border)] max-w-4xl max-h-[80vh] overflow-y-auto"
+        class="text-(--c-text-muted) bg-(--c-bg-card) border-(--c-border) max-w-4xl max-h-[80vh] overflow-y-auto"
       >
         <button
-          class="absolute right-4 top-4 p-1 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none hover:bg-[var(--c-hover)] text-[var(--c-text-muted)]"
+          class="absolute right-4 top-4 p-1 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none hover:bg-(--c-hover) text-(--c-text-muted)"
           @click="isDetailOverlayOpen = false"
         >
           <svg
@@ -1301,14 +1334,14 @@ const copyShareLink = async () => {
           <span class="sr-only">Close</span>
         </button>
         <AlertDialogHeader>
-          <AlertDialogTitle class="flex items-center gap-2 text-[var(--c-text-main)]"
+          <AlertDialogTitle class="flex items-center gap-2 text-(--c-text-main)"
             ><span
-              class="bg-[var(--c-hover)] text-[#00A0CC] text-xs px-2 py-0.5 rounded uppercase"
+              class="bg-(--c-hover) text-[#00A0CC] text-xs px-2 py-0.5 rounded uppercase"
               >Linked Entity</span
             >
             {{ linkedEntityData?.id }}</AlertDialogTitle
           >
-          <AlertDialogDescription class="text-[var(--c-text-muted)]/80"
+          <AlertDialogDescription class="text-(--c-text-muted)/80"
             >Type: {{ linkedEntityData?.type }}</AlertDialogDescription
           >
         </AlertDialogHeader>
@@ -1316,13 +1349,13 @@ const copyShareLink = async () => {
           <div
             v-for="(propString, index) in linkedEntityData.otherProps"
             :key="index"
-            class="p-3 bg-[var(--c-bg-app)] rounded border border-[var(--c-border)] text-sm"
+            class="p-3 bg-(--c-bg-app) rounded border border-(--c-border) text-sm"
           >
-            <div class="font-bold text-[var(--c-text-muted)] text-xs uppercase mb-1">
+            <div class="font-bold text-(--c-text-muted) text-xs uppercase mb-1">
               {{ propString.split(":\n")[0] }}
             </div>
             <div
-              class="whitespace-pre-wrap font-mono text-xs text-[var(--c-text-muted)]/80"
+              class="whitespace-pre-wrap font-mono text-xs text-(--c-text-muted)/80"
             >
               {{ propString.split(":\n")[1] }}
             </div>
@@ -1340,10 +1373,10 @@ const copyShareLink = async () => {
 
     <AlertDialog :open="isSearchOverlayOpen" @update:open="isSearchOverlayOpen = $event">
       <AlertDialogContent
-        class="text-[var(--c-text-muted)] bg-[var(--c-bg-card)] border-[var(--c-border)] !max-w-xl max-h-[80vh] overflow-y-auto"
+        class="text-(--c-text-muted) bg-(--c-bg-card) border-(--c-border) max-w-xl! max-h-[80vh] overflow-y-auto"
       >
         <button
-          class="absolute right-4 top-4 p-1 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none hover:bg-[var(--c-hover)] text-[var(--c-text-muted)]"
+          class="absolute right-4 top-4 p-1 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none hover:bg-(--c-hover) text-(--c-text-muted)"
           @click="isSearchOverlayOpen = false"
         >
           <svg
@@ -1363,12 +1396,12 @@ const copyShareLink = async () => {
           <span class="sr-only">Close</span>
         </button>
         <AlertDialogHeader>
-          <AlertDialogTitle class="text-[var(--c-text-main)]"
+          <AlertDialogTitle class="text-(--c-text-main)"
             >Search RO-Crate Entities</AlertDialogTitle
           >
-          <AlertDialogDescription class="text-[var(--c-text-muted)]/80"
+          <AlertDialogDescription class="text-(--c-text-muted)/80"
             >Use the Tantivy query format, e.g.,
-            <code class="bg-[var(--c-bg-app)] px-1 rounded font-mono"
+            <code class="bg-(--c-bg-app) px-1 rounded font-mono"
               >author.name:Smith AND entity_type:Dataset</code
             >.</AlertDialogDescription
           >
@@ -1379,11 +1412,11 @@ const copyShareLink = async () => {
             v-model="searchInput"
             @keyup.enter="runSearch"
             type="text"
-            class="flex h-10 w-full rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
+            class="flex h-10 w-full rounded-md border border-(--c-border) bg-(--c-bg-app) text-(--c-text-main) px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
             placeholder="Search query..."
           />
           <Button
-            class="h-10 px-4 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white flex-shrink-0"
+            class="h-10 px-4 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white shrink-0"
             @click="runSearch"
             :disabled="isSearching || !searchInput"
           >
@@ -1422,10 +1455,10 @@ const copyShareLink = async () => {
 
         <div
           v-if="searchResults.length > 0"
-          class="mt-4 p-2 bg-[var(--c-bg-app)] rounded border border-[var(--c-border)] max-h-[30vh] overflow-y-auto"
+          class="mt-4 p-2 bg-(--c-bg-app) rounded border border-(--c-border) max-h-[30vh] overflow-y-auto"
         >
           <p
-            class="text-xs font-bold text-[var(--c-text-muted)]/80 uppercase tracking-wider mb-1 px-1"
+            class="text-xs font-bold text-(--c-text-muted)/80 uppercase tracking-wider mb-1 px-1"
           >
             {{ searchResults.length }} result(s) found
           </p>
@@ -1434,9 +1467,9 @@ const copyShareLink = async () => {
               v-for="id in searchResults"
               :key="id"
               @click="handleSearchSelect(id)"
-              class="w-full text-left p-2 text-sm rounded-md hover:bg-[var(--c-hover)] transition-colors text-[var(--c-text-main)] truncate font-mono"
+              class="w-full text-left p-2 text-sm rounded-md hover:bg-(--c-hover) transition-colors text-(--c-text-main) truncate font-mono"
               :class="{
-                'bg-[var(--c-hover)] text-[#00A0CC] font-semibold':
+                'bg-(--c-hover) text-[#00A0CC] font-semibold':
                   selectedEntityId === id,
               }"
               :title="id"
@@ -1447,7 +1480,7 @@ const copyShareLink = async () => {
         </div>
         <div
           v-else-if="hasSearched && !isSearching"
-          class="mt-4 p-2 text-center text-sm text-[var(--c-text-muted)]/60"
+          class="mt-4 p-2 text-center text-sm text-(--c-text-muted)/60"
         >
           No results found for the last query.
         </div>

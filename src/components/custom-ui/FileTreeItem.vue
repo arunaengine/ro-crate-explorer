@@ -48,15 +48,15 @@ const onSelect = (id: string) => {
     <button
       @click="toggle"
       :class="[
-        'w-full text-left py-1.5 pr-2 flex items-center gap-2 hover:bg-[var(--c-hover)] transition-colors duration-150 border-l-2 relative group',
+        'w-full text-left py-1.5 pr-2 flex items-center gap-2 hover:bg-(--c-hover) transition-colors duration-150 border-l-2 relative group',
         selectedId === node.id
-          ? 'bg-[var(--c-hover)] border-[#00A0CC] text-[#00A0CC] font-semibold'
-          : 'border-transparent text-[var(--c-text-muted)]'
+          ? 'bg-(--c-hover) border-[#00A0CC] text-[#00A0CC] font-semibold'
+          : 'border-transparent text-(--c-text-muted)'
       ]"
       :style="indentStyle"
       :title="node.name"
     >
-      <span class="text-[var(--c-text-muted)]/60 flex-shrink-0 w-4 flex justify-center">
+      <span class="text-(--c-text-muted)/60 shrink-0 w-4 flex justify-center">
         <svg v-if="isFolder" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>
         </svg>
@@ -68,7 +68,7 @@ const onSelect = (id: string) => {
 
       <span class="truncate min-w-0 flex-1">{{ node.name }}</span>
 
-      <span v-if="isFolder" class="ml-auto text-xs text-[var(--c-text-muted)]/60 flex-shrink-0 pl-2">
+      <span v-if="isFolder" class="ml-auto text-xs text-(--c-text-muted)/60 shrink-0 pl-2">
         {{ isOpen ? '▼' : '▶' }}
       </span>
     </button>
