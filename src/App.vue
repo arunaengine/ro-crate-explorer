@@ -2,7 +2,7 @@
 import RoCrateEntity from "@/components/custom-ui/RoCrateEntity.vue";
 import FileTreeItem from "@/components/custom-ui/FileTreeItem.vue";
 import { ROCrate } from "ro-crate";
-import { onMounted, onUnmounted, ref, computed } from "vue";
+import { onMounted, onUnmounted, ref, computed, watch } from "vue";
 import { Button } from "@/components/ui/button";
 import { fetchCrateFromUrl, loadCrateFromFile } from '@/services/crateLoader';
 
@@ -82,6 +82,19 @@ const selectedEntityData = ref<{
   otherProps: Array<string>;
 } | null>(null);
 
+// Crate cache: stores fully processed crate data by URL for instant navigation
+interface CachedCrate {
+  json: any;
+  entities: any[];
+  expandedCrate: any[];
+  linkedDataHints: Record<string, Record<string, { propIri?: string; valueIris: string[] }>>;
+  crateName: string;
+}
+const crateCache = new Map<string, CachedCrate>();
+
+// Root crate URL - the first crate loaded, used for breadcrumb hierarchy
+const rootCrateUrl = ref<string | null>(null);
+
 // UI State
 const isDetailOverlayOpen = ref(false);
 const linkedEntityData = ref<any>(null);
@@ -101,7 +114,8 @@ const SHARE_URL_LIMIT = 8000;
 // --- Search State ---
 const isSearchOverlayOpen = ref(false);
 const searchInput = ref<string>("");
-const searchResults = ref<string[]>([]);
+// Store both entityId and crateId for each search result
+const searchResults = ref<Array<{ entityId: string; crateId: string }>>([]);
 const isSearching = ref(false);
 const searchErrorMsg = ref<string | null>(null);
 // Track if a search has ever been performed in the current session
@@ -337,42 +351,117 @@ const updateSelectedEntityView = () => {
   }
 };
 
+// Normalize RO-Crate JSON to use standard descriptor name
+// The ro-crate library expects "@id": "ro-crate-metadata.json" but some crates
+// use custom names like "proteomics-ro-crate-metadata.json"
+const normalizeDescriptorName = (json: any): any => {
+  if (!json || !json["@graph"]) return json;
+
+  const graph = json["@graph"];
+  const descriptorIndex = graph.findIndex((entity: any) => {
+    // Find the descriptor: a CreativeWork that conformsTo RO-Crate spec and has about pointing to root
+    if (entity["@type"] !== "CreativeWork") return false;
+    const conformsTo = entity["conformsTo"];
+    const conformsToId = conformsTo?.["@id"] || conformsTo;
+    if (!conformsToId || !String(conformsToId).includes("ro/crate")) return false;
+    const about = entity["about"];
+    const aboutId = about?.["@id"] || about;
+    return aboutId === "./" || aboutId === ".";
+  });
+
+  if (descriptorIndex === -1) return json;
+
+  const descriptor = graph[descriptorIndex];
+  // If already standard name, no change needed
+  if (descriptor["@id"] === "ro-crate-metadata.json") return json;
+
+  // Create a new graph with normalized descriptor name
+  const newGraph = [...graph];
+  newGraph[descriptorIndex] = {
+    ...descriptor,
+    "@id": "ro-crate-metadata.json"
+  };
+
+  return {
+    ...json,
+    "@graph": newGraph
+  };
+};
+
 const processCrateData = async (
   json: any,
   sourceName: string,
-  sourceUrl: string | null = null
+  sourceUrl: string | null = null,
+  isFirstCrate: boolean = false
 ) => {
   try {
-    const isSubcrate = historyStack.value.length > 0;
+    // Track root crate URL for breadcrumb hierarchy
+    if (isFirstCrate && sourceUrl) {
+      rootCrateUrl.value = sourceUrl;
+    }
 
+    // Check if we have fully processed cached data
+    const cachedData = sourceUrl ? crateCache.get(sourceUrl) : null;
+    if (cachedData && cachedData.expandedCrate) {
+      // Use cached processed data - instant restore
+      allEntities.value = cachedData.entities;
+      expandedCrate.value = cachedData.expandedCrate;
+      linkedDataHints.value = cachedData.linkedDataHints;
+      currentCrateName.value = cachedData.crateName;
+      fullCrateJson.value = JSON.stringify(cachedData.json, null, 2);
+      currentUrl.value = sourceUrl;
+
+      // Normalize and create ROCrate instance (lightweight)
+      const normalizedJson = normalizeDescriptorName(cachedData.json);
+      crate.value = new ROCrate(normalizedJson, { array: true, link: true });
+
+      // Update search index
+      const crateId = sourceUrl || 'primary';
+      if (isFirstCrate) {
+        buildSearchIndex(allEntities.value, crateId);
+      } else {
+        addToIndex(allEntities.value, crateId);
+      }
+
+      selectedEntityId.value = "./";
+      updateSelectedEntityView();
+
+      // Update breadcrumbs based on crate hierarchy
+      updateBreadcrumbsForCrate(sourceUrl);
+      return;
+    }
+
+    // Process new crate data
     allEntities.value = [];
     selectedEntityId.value = "./";
     selectedEntityData.value = null;
 
-    crate.value = new ROCrate(json, { array: true, link: true });
+    // Normalize descriptor name for ro-crate library compatibility
+    const normalizedJson = normalizeDescriptorName(json);
+    crate.value = new ROCrate(normalizedJson, { array: true, link: true });
 
     allEntities.value = json["@graph"] || [];
     fullCrateJson.value = JSON.stringify(json, null, 2);
     currentUrl.value = sourceUrl;
 
     // Build or add to search index
-    if (isSubcrate) {
-      // Add subcrate entities to existing index
-      addToIndex(allEntities.value, currentUrl.value || 'subcrate');
+    const crateId = sourceUrl || 'primary';
+    if (isFirstCrate) {
+      buildSearchIndex(allEntities.value, crateId);
     } else {
-      // Build fresh index for primary crate
-      buildSearchIndex(allEntities.value, currentUrl.value || 'primary');
+      addToIndex(allEntities.value, crateId);
     }
 
+    let expanded: any[] = [];
+    let hints: Record<string, Record<string, { propIri?: string; valueIris: string[] }>> = {};
+
     try {
-      const expanded = await jsonld.expand(json);
+      expanded = await jsonld.expand(json);
       expandedCrate.value = expanded;
-      console.log("Expanded crate:");
-      console.log({ expandedCrate });
-      console.log(expandedCrate);
 
       // Precompute linked-data hints (property/value IRIs) once per crate
-      linkedDataHints.value = await buildLinkedDataHints(json, expanded);
+      hints = await buildLinkedDataHints(json, expanded);
+      linkedDataHints.value = hints;
     } catch (e) {
       console.error("Expansion failed:", e);
       expandedCrate.value = [];
@@ -384,16 +473,92 @@ const processCrateData = async (
       crate.value?.rootDataset;
     currentCrateName.value = getSafeName(rootEntity, sourceName);
 
+    // Cache the fully processed crate data
+    if (sourceUrl) {
+      crateCache.set(sourceUrl, {
+        json,
+        entities: allEntities.value,
+        expandedCrate: expanded,
+        linkedDataHints: hints,
+        crateName: currentCrateName.value
+      });
+    }
+
     updateSelectedEntityView();
+
+    // Update breadcrumbs based on crate hierarchy
+    updateBreadcrumbsForCrate(sourceUrl);
   } catch (e: any) {
     errorMsg.value = "Failed to process RO-Crate JSON: " + e.message;
   }
 };
 
+// Compute breadcrumbs based on URL hierarchy from root crate
+const updateBreadcrumbsForCrate = (crateUrl: string | null) => {
+  if (!crateUrl || !rootCrateUrl.value) {
+    historyStack.value = [];
+    return;
+  }
+
+  // If we're at the root crate, no breadcrumbs needed
+  if (crateUrl === rootCrateUrl.value) {
+    historyStack.value = [];
+    return;
+  }
+
+  // Build breadcrumb hierarchy based on URL path
+  // e.g., root/subcrate1/subcrate2/ -> [root, subcrate1]
+  const newStack: HistoryItem[] = [];
+
+  try {
+    const rootUrl = new URL(rootCrateUrl.value);
+    const currentUrlObj = new URL(crateUrl);
+
+    // Get the path difference between root and current
+    const rootPath = rootUrl.pathname.replace(/\/$/, '');
+    const currentPath = currentUrlObj.pathname.replace(/\/$/, '');
+
+    if (currentPath.startsWith(rootPath)) {
+      // Current is a descendant of root
+      const relativePath = currentPath.slice(rootPath.length);
+      const pathParts = relativePath.split('/').filter(p => p);
+
+      // Build hierarchy from root to parent of current
+      let buildPath = rootPath;
+
+      // Add root crate first
+      const rootCached = crateCache.get(rootCrateUrl.value);
+      newStack.push({
+        name: rootCached?.crateName || 'Root',
+        url: rootCrateUrl.value
+      });
+
+      // Add intermediate crates
+      for (let i = 0; i < pathParts.length - 1; i++) {
+        buildPath += '/' + pathParts[i];
+        const intermediatePath = buildPath + '/';
+        const intermediateUrl: string = rootUrl.origin + intermediatePath;
+        const cached = crateCache.get(intermediateUrl);
+
+        newStack.push({
+          name: cached?.crateName || pathParts[i],
+          url: intermediateUrl
+        });
+      }
+    }
+  } catch (e) {
+    // URL parsing failed, fall back to empty breadcrumbs
+    console.warn('Failed to compute breadcrumb hierarchy:', e);
+  }
+
+  historyStack.value = newStack;
+};
+
 const fetchMetadata = async (
   crateId: string,
   sourceName: string,
-  sourceUrl: string | null = null
+  sourceUrl: string | null = null,
+  isFirstCrate: boolean = false
 ) => {
   try {
     let apiCrateId = crateId.endsWith("/") ? crateId.slice(0, -1) : crateId;
@@ -413,7 +578,7 @@ const fetchMetadata = async (
 
     const metadataJson = await response.json();
     console.log("Fetched Metadata: ", metadataJson);
-    processCrateData(metadataJson, sourceName, sourceUrl);
+    processCrateData(metadataJson, sourceName, sourceUrl, isFirstCrate);
   } catch (e: any) {
     throw new Error(`Metadata fetch failed: ${e.message}`);
   }
@@ -421,11 +586,36 @@ const fetchMetadata = async (
 
 const loadFromUrl = async () => {
   if (!inputUrl.value) return;
-  isLoading.value = true;
   errorMsg.value = null;
 
+  // Determine if this is the first crate load (empty history = fresh start)
+  const isFirstCrate = historyStack.value.length === 0;
+  const fetchUrl = inputUrl.value;
+
+  // Check cache first for faster navigation (no loading screen needed)
+  const cachedCrate = crateCache.get(fetchUrl);
+  if (cachedCrate) {
+    console.log("Using cached crate for:", fetchUrl);
+
+    // Set baseUrl for subcrate navigation
+    try {
+      const urlObj = new URL(fetchUrl);
+      urlObj.pathname = urlObj.pathname.endsWith("/")
+        ? urlObj.pathname
+        : urlObj.pathname + "/";
+      baseUrl.value = urlObj.href;
+    } catch (e) {
+      baseUrl.value = fetchUrl.endsWith("/") ? fetchUrl : fetchUrl + "/";
+    }
+
+    await processCrateData(cachedCrate, "Remote Crate (Cached)", fetchUrl, isFirstCrate);
+    return;
+  }
+
+  // Only show loading for non-cached fetches
+  isLoading.value = true;
+
   try {
-    const fetchUrl = inputUrl.value;
 
     // Stateless mode: fetch directly without indexing service
     if (config.isStateless) {
@@ -444,7 +634,7 @@ const loadFromUrl = async () => {
         baseUrl.value = fetchUrl.endsWith("/") ? fetchUrl : fetchUrl + "/";
       }
 
-      await processCrateData(json, "Remote Crate", fetchUrl);
+      await processCrateData(json, "Remote Crate", fetchUrl, isFirstCrate);
       return;
     }
 
@@ -491,7 +681,7 @@ const loadFromUrl = async () => {
             baseUrl.value = crateId.endsWith("/") ? crateId : crateId + "/";
           }
 
-          await fetchMetadata(crateId, "Remote Crate (Indexed)", fetchUrl);
+          await fetchMetadata(crateId, "Remote Crate (Indexed)", fetchUrl, isFirstCrate);
           return;
         }
       }
@@ -515,7 +705,7 @@ const loadFromUrl = async () => {
     }
 
     // 2. Fetch the actual metadata JSON-LD
-    await fetchMetadata(crateId, "Remote Crate", fetchUrl);
+    await fetchMetadata(crateId, "Remote Crate", fetchUrl, isFirstCrate);
   } catch (e: any) {
     errorMsg.value = `Error loading URL: ${e.message}`;
   } finally {
@@ -531,7 +721,8 @@ const loadFromPastedJson = async () => {
 
   try {
     const parsed = JSON.parse(pastedCrateText.value);
-    processCrateData(parsed, "Pasted Crate", null);
+    // Pasted crate is always a fresh start
+    processCrateData(parsed, "Pasted Crate", null, true);
   } catch (e: any) {
     errorMsg.value = `Paste error: ${e.message || e}`;
   } finally {
@@ -557,7 +748,8 @@ const handleFileUpload = async (event: Event) => {
       fullCrateJson.value = JSON.stringify(json, null, 2);
       currentUrl.value = file.name;
 
-      await processCrateData(json, file.name, null);
+      // File upload is always a fresh start
+      await processCrateData(json, file.name, null, true);
       return;
     }
 
@@ -580,7 +772,8 @@ const handleFileUpload = async (event: Event) => {
     let crateId = summary.primary_crate.crate_id;
     baseUrl.value = crateId.endsWith("/") ? crateId : crateId + "/";
 
-    await fetchMetadata(crateId, file.name, null);
+    // File upload is always a fresh start
+    await fetchMetadata(crateId, file.name, null, true);
   } catch (e: any) {
     errorMsg.value = `File error: ${e.message}`;
   } finally {
@@ -610,7 +803,7 @@ const runSearch = async () => {
     // In stateless mode, always use local search
     if (config.isStateless) {
       const results = localSearch(searchInput.value, limit);
-      searchResults.value = results.map(r => r.entityId);
+      searchResults.value = results; // Already has { entityId, crateId }
     } else {
       // In stateful mode, try remote search first, fall back to local on error
       try {
@@ -642,14 +835,17 @@ const runSearch = async () => {
             "Invalid search response format. Expected an object with a 'hits' array."
           );
         } else {
-          // Map the array of hit objects to an array of entity_id strings
-          searchResults.value = data.hits.map((hit: any) => hit.entity_id);
+          // Map the array of hit objects to include both entityId and crateId
+          searchResults.value = data.hits.map((hit: any) => ({
+            entityId: hit.entity_id,
+            crateId: hit.crate_id || currentUrl.value || 'unknown'
+          }));
         }
       } catch (remoteError: any) {
         // Fallback to local search if remote search fails
         console.warn('Remote search failed, falling back to local search:', remoteError.message);
         const results = localSearch(searchInput.value, limit);
-        searchResults.value = results.map(r => r.entityId);
+        searchResults.value = results; // Already has { entityId, crateId }
       }
     }
   } catch (e: any) {
@@ -660,12 +856,38 @@ const runSearch = async () => {
   }
 };
 
-const handleSearchSelect = (entityId: string) => {
-  // 1. Select the entity in the main view
+const handleSearchSelect = async (result: { entityId: string; crateId: string }) => {
+  const { entityId, crateId } = result;
+
+  // Check if the entity is in a different crate than the current one
+  const isInCurrentCrate = currentUrl.value === crateId ||
+    allEntities.value.some(e => e["@id"] === entityId);
+
+  if (!isInCurrentCrate && crateId && crateCache.has(crateId)) {
+    // Navigate to the cached crate first, then select the entity
+    const cachedCrate = crateCache.get(crateId);
+    if (cachedCrate) {
+      // Update baseUrl for the target crate
+      try {
+        const urlObj = new URL(crateId);
+        urlObj.pathname = urlObj.pathname.endsWith("/")
+          ? urlObj.pathname
+          : urlObj.pathname + "/";
+        baseUrl.value = urlObj.href;
+      } catch (e) {
+        baseUrl.value = crateId.endsWith("/") ? crateId : crateId + "/";
+      }
+
+      // Process the cached crate (this updates allEntities)
+      await processCrateData(cachedCrate, "Cached Crate", crateId);
+    }
+  }
+
+  // Now select the entity (should be in the current allEntities)
   selectEntity(entityId);
-  // 2. Close the search overlay
+
+  // Close the search overlay and clear search state
   isSearchOverlayOpen.value = false;
-  // 3. Clear search state and reset hasSearched
   searchInput.value = "";
   searchResults.value = [];
   searchErrorMsg.value = null;
@@ -708,12 +930,17 @@ const handleSubcrateOpen = async (subcrateId: string) => {
     resolvedUrl = subcrateId;
   }
 
-  // Normalize the URL by removing ro-crate-metadata.json if present
+  // Normalize the URL by removing the metadata filename if present
   // This gives us the directory URL which serves as the base for subcrate navigation
+  // We also preserve the original metadata filename to use when fetching
   let subcrateBaseUrl: string;
+  let metadataFilename: string = "ro-crate-metadata.json"; // Default filename
   try {
     const urlObj = new URL(resolvedUrl);
-    if (urlObj.pathname.toLowerCase().endsWith("ro-crate-metadata.json")) {
+    // Match any filename ending with ro-crate-metadata.json (e.g., genomics-ro-crate-metadata.json)
+    const metadataMatch = urlObj.pathname.match(/([^\/]+ro-crate-metadata\.json)$/i);
+    if (metadataMatch && metadataMatch[1]) {
+      metadataFilename = metadataMatch[1]; // Preserve the original filename
       const pathParts = urlObj.pathname.split("/");
       pathParts.pop();
       urlObj.pathname = pathParts.join("/");
@@ -722,13 +949,15 @@ const handleSubcrateOpen = async (subcrateId: string) => {
       }
       subcrateBaseUrl = urlObj.href;
     } else {
-      // If it doesn't end with the metadata filename, ensure trailing slash
+      // If it doesn't end with a metadata filename, ensure trailing slash
       subcrateBaseUrl = resolvedUrl.endsWith("/") ? resolvedUrl : resolvedUrl + "/";
     }
   } catch (e) {
     // Fallback for non-URL strings
-    const filenameRegex = /[\/\\]ro-crate-metadata\.json$/i;
-    if (filenameRegex.test(resolvedUrl)) {
+    const filenameRegex = /[\/\\]([^\/\\]+ro-crate-metadata\.json)$/i;
+    const fallbackMatch = resolvedUrl.match(filenameRegex);
+    if (fallbackMatch && fallbackMatch[1]) {
+      metadataFilename = fallbackMatch[1];
       subcrateBaseUrl = resolvedUrl.replace(filenameRegex, "/");
     } else {
       subcrateBaseUrl = resolvedUrl.endsWith("/") ? resolvedUrl : resolvedUrl + "/";
@@ -740,24 +969,42 @@ const handleSubcrateOpen = async (subcrateId: string) => {
     subcrateBaseUrl = ".";
   }
 
-  isLoading.value = true;
   errorMsg.value = null;
+
+  // Check cache first for faster subcrate navigation (no loading screen needed)
+  const cacheKey = subcrateBaseUrl.endsWith("/") ? subcrateBaseUrl : subcrateBaseUrl + "/";
+  const cachedCrate = crateCache.get(cacheKey);
+
+  if (cachedCrate && config.isStateless) {
+    console.log("Using cached subcrate for:", cacheKey);
+
+    // Update state for cached subcrate
+    baseUrl.value = subcrateBaseUrl.endsWith("/") ? subcrateBaseUrl : subcrateBaseUrl + "/";
+    inputUrl.value = subcrateBaseUrl;
+    currentUrl.value = baseUrl.value;
+
+    await processCrateData(cachedCrate, "Subcrate (Cached)", baseUrl.value);
+    return;
+  }
+
+  // Only show loading for non-cached fetches
+  isLoading.value = true;
 
   try {
     // Stateless mode: fetch directly without indexing service
     if (config.isStateless) {
-      // Construct the full URL to the subcrate's ro-crate-metadata.json
+      // Construct the full URL to the subcrate's metadata file (using preserved filename)
       let fetchUrl: string;
       if (subcrateBaseUrl === ".") {
-        fetchUrl = "ro-crate-metadata.json";
+        fetchUrl = metadataFilename;
       } else if (subcrateBaseUrl.toLowerCase().endsWith("ro-crate-metadata.json")) {
         // Already has the filename (shouldn't happen due to normalization above, but defensive)
         fetchUrl = subcrateBaseUrl;
       } else {
-        // Append the metadata filename
+        // Append the preserved metadata filename
         fetchUrl = subcrateBaseUrl.endsWith("/")
-          ? subcrateBaseUrl + "ro-crate-metadata.json"
-          : subcrateBaseUrl + "/ro-crate-metadata.json";
+          ? subcrateBaseUrl + metadataFilename
+          : subcrateBaseUrl + "/" + metadataFilename;
       }
 
       const json = await fetchCrateFromUrl(fetchUrl);
@@ -830,6 +1077,9 @@ const resetApp = () => {
   searchErrorMsg.value = null;
   hasSearched.value = false;
 
+  // Clear the crate cache
+  crateCache.clear();
+
   // Clear the search index
   clearSearchIndex();
 };
@@ -842,7 +1092,8 @@ onMounted(() => {
   if (crateParam) {
     try {
       const parsed = JSON.parse(crateParam);
-      processCrateData(parsed, "Shared Crate", null);
+      // Shared crate is always a fresh start
+      processCrateData(parsed, "Shared Crate", null, true);
 
       const cleanUrl = new URL(window.location.href);
       cleanUrl.searchParams.delete("crate");
@@ -870,6 +1121,26 @@ onUnmounted(() => {
   if (shareToastTimeout) {
     clearTimeout(shareToastTimeout);
   }
+});
+
+// Debounced search for stateless mode - search as user types
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+watch(searchInput, (newValue) => {
+  if (!config.isStateless) return;
+
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+  }
+
+  if (!newValue) {
+    searchResults.value = [];
+    hasSearched.value = false;
+    return;
+  }
+
+  searchDebounceTimer = setTimeout(() => {
+    runSearch();
+  }, 150); // Short debounce for responsive feel
 });
 
 const showShareToast = (message: string, isError = false) => {
@@ -1399,11 +1670,14 @@ const copyShareLink = async () => {
           <AlertDialogTitle class="text-(--c-text-main)"
             >Search RO-Crate Entities</AlertDialogTitle
           >
-          <AlertDialogDescription class="text-(--c-text-muted)/80"
+          <AlertDialogDescription v-if="!config.isStateless" class="text-(--c-text-muted)/80"
             >Use the Tantivy query format, e.g.,
             <code class="bg-(--c-bg-app) px-1 rounded font-mono"
               >author.name:Smith AND entity_type:Dataset</code
             >.</AlertDialogDescription
+          >
+          <AlertDialogDescription v-else class="text-(--c-text-muted)/80"
+            >Search by entity ID, name, or type.</AlertDialogDescription
           >
         </AlertDialogHeader>
 
@@ -1416,6 +1690,7 @@ const copyShareLink = async () => {
             placeholder="Search query..."
           />
           <Button
+            v-if="!config.isStateless"
             class="h-10 px-4 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white shrink-0"
             @click="runSearch"
             :disabled="isSearching || !searchInput"
@@ -1464,17 +1739,21 @@ const copyShareLink = async () => {
           </p>
           <div class="flex flex-col gap-1">
             <button
-              v-for="id in searchResults"
-              :key="id"
-              @click="handleSearchSelect(id)"
+              v-for="result in searchResults"
+              :key="result.entityId + result.crateId"
+              @click="handleSearchSelect(result)"
               class="w-full text-left p-2 text-sm rounded-md hover:bg-(--c-hover) transition-colors text-(--c-text-main) truncate font-mono"
               :class="{
                 'bg-(--c-hover) text-[#00A0CC] font-semibold':
-                  selectedEntityId === id,
+                  selectedEntityId === result.entityId,
               }"
-              :title="id"
+              :title="result.entityId"
             >
-              {{ id }}
+              <span>{{ result.entityId }}</span>
+              <span
+                v-if="result.crateId !== currentUrl"
+                class="ml-2 text-xs text-(--c-text-muted)/60"
+              >({{ result.crateId.split('/').slice(-2, -1)[0] || 'other crate' }})</span>
             </button>
           </div>
         </div>
