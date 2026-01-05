@@ -2,8 +2,9 @@
 import RoCrateEntity from "@/components/custom-ui/RoCrateEntity.vue";
 import FileTreeItem from "@/components/custom-ui/FileTreeItem.vue";
 import { ROCrate } from "ro-crate";
-import { onMounted, ref, computed } from "vue";
+import { onMounted, onUnmounted, ref, computed, watch } from "vue";
 import { Button } from "@/components/ui/button";
+import { fetchCrateFromUrl, loadCrateFromFile } from '@/services/crateLoader';
 
 import {
   AlertDialog,
@@ -25,8 +26,10 @@ import {
 import arunaBg from "@/assets/aruna-background.jpeg";
 
 import * as jsonld from "jsonld";
+import { config } from "@/config";
+import { buildSearchIndex, localSearch, clearSearchIndex, addToIndex } from "@/services/searchService";
 
-const INDEXING_SERVICE_BASE_URL = "http://localhost:3000";
+const INDEXING_SERVICE_BASE_URL = config.indexingServiceUrl;
 
 interface TreeNode {
   name: string;
@@ -79,6 +82,19 @@ const selectedEntityData = ref<{
   otherProps: Array<string>;
 } | null>(null);
 
+// Crate cache: stores fully processed crate data by URL for instant navigation
+interface CachedCrate {
+  json: any;
+  entities: any[];
+  expandedCrate: any[];
+  linkedDataHints: Record<string, Record<string, { propIri?: string; valueIris: string[] }>>;
+  crateName: string;
+}
+const crateCache = new Map<string, CachedCrate>();
+
+// Root crate URL - the first crate loaded, used for breadcrumb hierarchy
+const rootCrateUrl = ref<string | null>(null);
+
 // UI State
 const isDetailOverlayOpen = ref(false);
 const linkedEntityData = ref<any>(null);
@@ -95,10 +111,20 @@ let shareToastTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const SHARE_URL_LIMIT = 8000;
 
+// Computed property to check if crate is too large to share
+const isCrateTooLargeToShare = computed(() => {
+  if (!fullCrateJson.value) return false;
+  // Estimate URL length: base URL + "?crate=" + JSON content
+  // Use a conservative estimate for the base URL overhead
+  const estimatedLength = 100 + fullCrateJson.value.length;
+  return estimatedLength > SHARE_URL_LIMIT;
+});
+
 // --- Search State ---
 const isSearchOverlayOpen = ref(false);
 const searchInput = ref<string>("");
-const searchResults = ref<string[]>([]);
+// Store both entityId and crateId for each search result
+const searchResults = ref<Array<{ entityId: string; crateId: string }>>([]);
 const isSearching = ref(false);
 const searchErrorMsg = ref<string | null>(null);
 // Track if a search has ever been performed in the current session
@@ -334,31 +360,117 @@ const updateSelectedEntityView = () => {
   }
 };
 
+// Normalize RO-Crate JSON to use standard descriptor name
+// The ro-crate library expects "@id": "ro-crate-metadata.json" but some crates
+// use custom names like "proteomics-ro-crate-metadata.json"
+const normalizeDescriptorName = (json: any): any => {
+  if (!json || !json["@graph"]) return json;
+
+  const graph = json["@graph"];
+  const descriptorIndex = graph.findIndex((entity: any) => {
+    // Find the descriptor: a CreativeWork that conformsTo RO-Crate spec and has about pointing to root
+    if (entity["@type"] !== "CreativeWork") return false;
+    const conformsTo = entity["conformsTo"];
+    const conformsToId = conformsTo?.["@id"] || conformsTo;
+    if (!conformsToId || !String(conformsToId).includes("ro/crate")) return false;
+    const about = entity["about"];
+    const aboutId = about?.["@id"] || about;
+    return aboutId === "./" || aboutId === ".";
+  });
+
+  if (descriptorIndex === -1) return json;
+
+  const descriptor = graph[descriptorIndex];
+  // If already standard name, no change needed
+  if (descriptor["@id"] === "ro-crate-metadata.json") return json;
+
+  // Create a new graph with normalized descriptor name
+  const newGraph = [...graph];
+  newGraph[descriptorIndex] = {
+    ...descriptor,
+    "@id": "ro-crate-metadata.json"
+  };
+
+  return {
+    ...json,
+    "@graph": newGraph
+  };
+};
+
 const processCrateData = async (
   json: any,
   sourceName: string,
-  sourceUrl: string | null = null
+  sourceUrl: string | null = null,
+  isFirstCrate: boolean = false
 ) => {
   try {
+    // Track root crate URL for breadcrumb hierarchy
+    if (isFirstCrate && sourceUrl) {
+      rootCrateUrl.value = sourceUrl;
+    }
+
+    // Check if we have fully processed cached data
+    const cachedData = sourceUrl ? crateCache.get(sourceUrl) : null;
+    if (cachedData && cachedData.expandedCrate) {
+      // Use cached processed data - instant restore
+      allEntities.value = cachedData.entities;
+      expandedCrate.value = cachedData.expandedCrate;
+      linkedDataHints.value = cachedData.linkedDataHints;
+      currentCrateName.value = cachedData.crateName;
+      fullCrateJson.value = JSON.stringify(cachedData.json, null, 2);
+      currentUrl.value = sourceUrl;
+
+      // Normalize and create ROCrate instance (lightweight)
+      const normalizedJson = normalizeDescriptorName(cachedData.json);
+      crate.value = new ROCrate(normalizedJson, { array: true, link: true });
+
+      // Update search index
+      const crateId = sourceUrl || 'primary';
+      if (isFirstCrate) {
+        buildSearchIndex(allEntities.value, crateId);
+      } else {
+        addToIndex(allEntities.value, crateId);
+      }
+
+      selectedEntityId.value = "./";
+      updateSelectedEntityView();
+
+      // Update breadcrumbs based on crate hierarchy
+      updateBreadcrumbsForCrate(sourceUrl);
+      return;
+    }
+
+    // Process new crate data
     allEntities.value = [];
     selectedEntityId.value = "./";
     selectedEntityData.value = null;
 
-    crate.value = new ROCrate(json, { array: true, link: true });
+    // Normalize descriptor name for ro-crate library compatibility
+    const normalizedJson = normalizeDescriptorName(json);
+    crate.value = new ROCrate(normalizedJson, { array: true, link: true });
 
     allEntities.value = json["@graph"] || [];
     fullCrateJson.value = JSON.stringify(json, null, 2);
     currentUrl.value = sourceUrl;
 
+    // Build or add to search index
+    const crateId = sourceUrl || 'primary';
+    if (isFirstCrate) {
+      buildSearchIndex(allEntities.value, crateId);
+    } else {
+      addToIndex(allEntities.value, crateId);
+    }
+
+    let expanded: any[] = [];
+    let hints: Record<string, Record<string, { propIri?: string; valueIris: string[] }>> = {};
+
     try {
-      const expanded = await jsonld.expand(json);
+      expanded = await jsonld.expand(json);
       expandedCrate.value = expanded;
-      console.log("Expanded crate:");
-      console.log({ expandedCrate });
-      console.log(expandedCrate);
 
       // Precompute linked-data hints (property/value IRIs) once per crate
-      linkedDataHints.value = await buildLinkedDataHints(json, expanded);
+      hints = await buildLinkedDataHints(json, expanded);
+      linkedDataHints.value = hints;
     } catch (e) {
       console.error("Expansion failed:", e);
       expandedCrate.value = [];
@@ -370,16 +482,49 @@ const processCrateData = async (
       crate.value?.rootDataset;
     currentCrateName.value = getSafeName(rootEntity, sourceName);
 
+    // Cache the fully processed crate data
+    if (sourceUrl) {
+      crateCache.set(sourceUrl, {
+        json,
+        entities: allEntities.value,
+        expandedCrate: expanded,
+        linkedDataHints: hints,
+        crateName: currentCrateName.value
+      });
+    }
+
     updateSelectedEntityView();
+
+    // Update breadcrumbs based on crate hierarchy
+    updateBreadcrumbsForCrate(sourceUrl);
   } catch (e: any) {
     errorMsg.value = "Failed to process RO-Crate JSON: " + e.message;
   }
 };
 
+// Update breadcrumbs - only clears when at root crate, otherwise preserves navigation history
+const updateBreadcrumbsForCrate = (crateUrl: string | null) => {
+  // If no URL or no root crate set, clear breadcrumbs (fresh start)
+  if (!crateUrl || !rootCrateUrl.value) {
+    historyStack.value = [];
+    return;
+  }
+
+  // If we're at the root crate, clear breadcrumbs (we're at the top)
+  if (crateUrl === rootCrateUrl.value) {
+    historyStack.value = [];
+    return;
+  }
+
+  // Otherwise, preserve the existing history stack - it's managed by handleSubcrateOpen
+  // and goBack/goToBreadcrumb functions
+};
+
 const fetchMetadata = async (
   crateId: string,
   sourceName: string,
-  sourceUrl: string | null = null
+  sourceUrl: string | null = null,
+  isFirstCrate: boolean = false
 ) => {
   try {
     let apiCrateId = crateId.endsWith("/") ? crateId.slice(0, -1) : crateId;
@@ -399,7 +544,7 @@ const fetchMetadata = async (
 
     const metadataJson = await response.json();
     console.log("Fetched Metadata: ", metadataJson);
-    processCrateData(metadataJson, sourceName, sourceUrl);
+    processCrateData(metadataJson, sourceName, sourceUrl, isFirstCrate);
   } catch (e: any) {
     throw new Error(`Metadata fetch failed: ${e.message}`);
   }
@@ -407,12 +552,59 @@ const fetchMetadata = async (
 
 const loadFromUrl = async () => {
   if (!inputUrl.value) return;
-  isLoading.value = true;
   errorMsg.value = null;
 
-  try {
-    const fetchUrl = inputUrl.value;
+  // Determine if this is the first crate load (no root crate set yet)
+  const isFirstCrate = rootCrateUrl.value === null;
+  const fetchUrl = inputUrl.value;
 
+  // Check cache first for faster navigation (no loading screen needed)
+  const cachedCrate = crateCache.get(fetchUrl);
+  if (cachedCrate && cachedCrate.json) {
+    console.log("Using cached crate for:", fetchUrl);
+
+    // Set baseUrl for subcrate navigation
+    try {
+      const urlObj = new URL(fetchUrl);
+      urlObj.pathname = urlObj.pathname.endsWith("/")
+        ? urlObj.pathname
+        : urlObj.pathname + "/";
+      baseUrl.value = urlObj.href;
+    } catch (e) {
+      baseUrl.value = fetchUrl.endsWith("/") ? fetchUrl : fetchUrl + "/";
+    }
+
+    await processCrateData(cachedCrate.json, "Remote Crate (Cached)", fetchUrl, isFirstCrate);
+    return;
+  }
+
+  // Only show loading for non-cached fetches
+  isLoading.value = true;
+
+  try {
+
+    // Stateless mode: fetch directly without indexing service
+    if (config.isStateless) {
+      const json = await fetchCrateFromUrl(fetchUrl);
+      fullCrateJson.value = JSON.stringify(json, null, 2);
+      currentUrl.value = fetchUrl;
+
+      // Set baseUrl for subcrate navigation
+      try {
+        const urlObj = new URL(fetchUrl);
+        urlObj.pathname = urlObj.pathname.endsWith("/")
+          ? urlObj.pathname
+          : urlObj.pathname + "/";
+        baseUrl.value = urlObj.href;
+      } catch (e) {
+        baseUrl.value = fetchUrl.endsWith("/") ? fetchUrl : fetchUrl + "/";
+      }
+
+      await processCrateData(json, "Remote Crate", fetchUrl, isFirstCrate);
+      return;
+    }
+
+    // Stateful mode: use indexing service
     const summaryResponse = await fetch(`${INDEXING_SERVICE_BASE_URL}/crates/url`, {
       method: "POST",
       headers: {
@@ -455,7 +647,7 @@ const loadFromUrl = async () => {
             baseUrl.value = crateId.endsWith("/") ? crateId : crateId + "/";
           }
 
-          await fetchMetadata(crateId, "Remote Crate (Indexed)", fetchUrl);
+          await fetchMetadata(crateId, "Remote Crate (Indexed)", fetchUrl, isFirstCrate);
           return;
         }
       }
@@ -479,7 +671,7 @@ const loadFromUrl = async () => {
     }
 
     // 2. Fetch the actual metadata JSON-LD
-    await fetchMetadata(crateId, "Remote Crate", fetchUrl);
+    await fetchMetadata(crateId, "Remote Crate", fetchUrl, isFirstCrate);
   } catch (e: any) {
     errorMsg.value = `Error loading URL: ${e.message}`;
   } finally {
@@ -495,7 +687,8 @@ const loadFromPastedJson = async () => {
 
   try {
     const parsed = JSON.parse(pastedCrateText.value);
-    processCrateData(parsed, "Pasted Crate", null);
+    // Pasted crate is always a fresh start
+    processCrateData(parsed, "Pasted Crate", null, true);
   } catch (e: any) {
     errorMsg.value = `Paste error: ${e.message || e}`;
   } finally {
@@ -515,6 +708,18 @@ const handleFileUpload = async (event: Event) => {
   baseUrl.value = "";
 
   try {
+    // Stateless mode: load file directly without indexing service
+    if (config.isStateless) {
+      const json = await loadCrateFromFile(file);
+      fullCrateJson.value = JSON.stringify(json, null, 2);
+      currentUrl.value = file.name;
+
+      // File upload is always a fresh start
+      await processCrateData(json, file.name, null, true);
+      return;
+    }
+
+    // Stateful mode: use indexing service
     const formData = new FormData();
     formData.append("file", file);
 
@@ -533,7 +738,8 @@ const handleFileUpload = async (event: Event) => {
     let crateId = summary.primary_crate.crate_id;
     baseUrl.value = crateId.endsWith("/") ? crateId : crateId + "/";
 
-    await fetchMetadata(crateId, file.name, null);
+    // File upload is always a fresh start
+    await fetchMetadata(crateId, file.name, null, true);
   } catch (e: any) {
     errorMsg.value = `File error: ${e.message}`;
   } finally {
@@ -558,37 +764,55 @@ const runSearch = async () => {
   hasSearched.value = true; // Set to true right before running search
 
   try {
-    // Construct the URL with query parameters 'q' and 'limit'
     const limit = 50; // Set a reasonable limit for displayed results
-    const queryParams = new URLSearchParams({
-      q: searchInput.value,
-      limit: String(limit),
-    }).toString();
 
-    const searchUrl = `${INDEXING_SERVICE_BASE_URL}/search?${queryParams}`;
-
-    const response = await fetch(searchUrl, {
-      method: "GET", // Use GET method
-      headers: {
-        Accept: "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Search failed (${response.status}): ${errText}`);
-    }
-
-    const data = await response.json();
-
-    if (!(data && Array.isArray(data.hits))) {
-      // If 'data' is null, not an object, or 'hits' isn't an array, throw the error.
-      throw new Error(
-        "Invalid search response format. Expected an object with a 'hits' array."
-      );
+    // In stateless mode, always use local search
+    if (config.isStateless) {
+      const results = localSearch(searchInput.value, limit);
+      searchResults.value = results; // Already has { entityId, crateId }
     } else {
-      // Map the array of hit objects to an array of entity_id strings
-      searchResults.value = data.hits.map((hit: any) => hit.entity_id);
+      // In stateful mode, try remote search first, fall back to local on error
+      try {
+        // Construct the URL with query parameters 'q' and 'limit'
+        const queryParams = new URLSearchParams({
+          q: searchInput.value,
+          limit: String(limit),
+        }).toString();
+
+        const searchUrl = `${INDEXING_SERVICE_BASE_URL}/search?${queryParams}`;
+
+        const response = await fetch(searchUrl, {
+          method: "GET", // Use GET method
+          headers: {
+            Accept: "application/json",
+          },
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`Search failed (${response.status}): ${errText}`);
+        }
+
+        const data = await response.json();
+
+        if (!(data && Array.isArray(data.hits))) {
+          // If 'data' is null, not an object, or 'hits' isn't an array, throw the error.
+          throw new Error(
+            "Invalid search response format. Expected an object with a 'hits' array."
+          );
+        } else {
+          // Map the array of hit objects to include both entityId and crateId
+          searchResults.value = data.hits.map((hit: any) => ({
+            entityId: hit.entity_id,
+            crateId: hit.crate_id || currentUrl.value || 'unknown'
+          }));
+        }
+      } catch (remoteError: any) {
+        // Fallback to local search if remote search fails
+        console.warn('Remote search failed, falling back to local search:', remoteError.message);
+        const results = localSearch(searchInput.value, limit);
+        searchResults.value = results; // Already has { entityId, crateId }
+      }
     }
   } catch (e: any) {
     searchErrorMsg.value = e.message;
@@ -598,12 +822,38 @@ const runSearch = async () => {
   }
 };
 
-const handleSearchSelect = (entityId: string) => {
-  // 1. Select the entity in the main view
+const handleSearchSelect = async (result: { entityId: string; crateId: string }) => {
+  const { entityId, crateId } = result;
+
+  // Check if the entity is in a different crate than the current one
+  const isInCurrentCrate = currentUrl.value === crateId ||
+    allEntities.value.some(e => e["@id"] === entityId);
+
+  if (!isInCurrentCrate && crateId && crateCache.has(crateId)) {
+    // Navigate to the cached crate first, then select the entity
+    const cachedCrate = crateCache.get(crateId);
+    if (cachedCrate) {
+      // Update baseUrl for the target crate
+      try {
+        const urlObj = new URL(crateId);
+        urlObj.pathname = urlObj.pathname.endsWith("/")
+          ? urlObj.pathname
+          : urlObj.pathname + "/";
+        baseUrl.value = urlObj.href;
+      } catch (e) {
+        baseUrl.value = crateId.endsWith("/") ? crateId : crateId + "/";
+      }
+
+      // Process the cached crate (this updates allEntities)
+      await processCrateData(cachedCrate, "Cached Crate", crateId);
+    }
+  }
+
+  // Now select the entity (should be in the current allEntities)
   selectEntity(entityId);
-  // 2. Close the search overlay
+
+  // Close the search overlay and clear search state
   isSearchOverlayOpen.value = false;
-  // 3. Clear search state and reset hasSearched
   searchInput.value = "";
   searchResults.value = [];
   searchErrorMsg.value = null;
@@ -625,73 +875,157 @@ const handleSelectLink = (entityId: string) => {
   }
 };
 
-const handleSubcrateOpen = (subcrateId: string) => {
+const handleSubcrateOpen = async (subcrateId: string) => {
   if (!baseUrl.value) {
     // Using console.error instead of alert per instructions
     console.error("Cannot determine the base crate identifier for subcrate navigation.");
     return;
   }
 
-  // Preserve the current state for history navigation
-  const currentHistoryUrl = currentUrl.value || baseUrl.value;
-  historyStack.value.push({ name: currentCrateName.value, url: currentHistoryUrl });
+  // Push current crate onto history stack BEFORE navigating to subcrate
+  // This ensures the breadcrumb hierarchy is maintained
+  if (currentUrl.value || baseUrl.value) {
+    historyStack.value.push({
+      name: currentCrateName.value,
+      url: currentUrl.value || baseUrl.value
+    });
+  }
 
-  let apiCrateId = subcrateId;
-
+  // Resolve the subcrate ID to a full URL (handling both absolute and relative paths)
+  let resolvedUrl: string;
   try {
     const fullUrl = new URL(subcrateId, baseUrl.value);
+    resolvedUrl = fullUrl.href;
+  } catch (e) {
+    // If URL construction fails, use the subcrateId as-is
+    resolvedUrl = subcrateId;
+  }
 
-    if (fullUrl.pathname.toLowerCase().endsWith("ro-crate-metadata.json")) {
-      const pathParts = fullUrl.pathname.split("/");
+  // Normalize the URL by removing the metadata filename if present
+  // This gives us the directory URL which serves as the base for subcrate navigation
+  // We also preserve the original metadata filename to use when fetching
+  let subcrateBaseUrl: string;
+  let metadataFilename: string = "ro-crate-metadata.json"; // Default filename
+  try {
+    const urlObj = new URL(resolvedUrl);
+    // Match any filename ending with ro-crate-metadata.json (e.g., genomics-ro-crate-metadata.json)
+    const metadataMatch = urlObj.pathname.match(/([^\/]+ro-crate-metadata\.json)$/i);
+    if (metadataMatch && metadataMatch[1]) {
+      metadataFilename = metadataMatch[1]; // Preserve the original filename
+      const pathParts = urlObj.pathname.split("/");
       pathParts.pop();
-
-      fullUrl.pathname = pathParts.join("/");
-
-      if (!fullUrl.pathname.endsWith("/")) {
-        fullUrl.pathname += "/";
+      urlObj.pathname = pathParts.join("/");
+      if (!urlObj.pathname.endsWith("/")) {
+        urlObj.pathname += "/";
       }
-
-      apiCrateId = fullUrl.href;
+      subcrateBaseUrl = urlObj.href;
+    } else {
+      // If it doesn't end with a metadata filename, ensure trailing slash
+      subcrateBaseUrl = resolvedUrl.endsWith("/") ? resolvedUrl : resolvedUrl + "/";
     }
   } catch (e) {
-    const filenameRegex = /[\/\\]ro-crate-metadata\.json$/i;
-    if (filenameRegex.test(apiCrateId)) {
-      apiCrateId = apiCrateId.replace(filenameRegex, "");
+    // Fallback for non-URL strings
+    const filenameRegex = /[\/\\]([^\/\\]+ro-crate-metadata\.json)$/i;
+    const fallbackMatch = resolvedUrl.match(filenameRegex);
+    if (fallbackMatch && fallbackMatch[1]) {
+      metadataFilename = fallbackMatch[1];
+      subcrateBaseUrl = resolvedUrl.replace(filenameRegex, "/");
+    } else {
+      subcrateBaseUrl = resolvedUrl.endsWith("/") ? resolvedUrl : resolvedUrl + "/";
     }
   }
 
-  if (apiCrateId === "") apiCrateId = ".";
+  // Special case: empty path becomes "."
+  if (subcrateBaseUrl === "") {
+    subcrateBaseUrl = ".";
+  }
 
-  // FIX: Redefine baseUrl to the ID of the subcrate we just navigated to.
-  // This is crucial for resolving subsequent relative paths correctly.
-  baseUrl.value = apiCrateId.endsWith("/") ? apiCrateId : apiCrateId + "/";
-
-  // Update inputUrl (for future loadFromUrl calls) and currentUrl (for display)
-  inputUrl.value = apiCrateId;
-  currentUrl.value = baseUrl.value; // Use the new base URL for history tracking
-
-  isLoading.value = true;
   errorMsg.value = null;
 
-  fetchMetadata(apiCrateId, "Subcrate", baseUrl.value).finally(() => {
+  // Check cache first for faster subcrate navigation (no loading screen needed)
+  const cacheKey = subcrateBaseUrl.endsWith("/") ? subcrateBaseUrl : subcrateBaseUrl + "/";
+  const cachedCrate = crateCache.get(cacheKey);
+
+  if (cachedCrate && cachedCrate.json && config.isStateless) {
+    console.log("Using cached subcrate for:", cacheKey);
+
+    // Update state for cached subcrate
+    baseUrl.value = subcrateBaseUrl.endsWith("/") ? subcrateBaseUrl : subcrateBaseUrl + "/";
+    inputUrl.value = subcrateBaseUrl;
+    currentUrl.value = baseUrl.value;
+
+    await processCrateData(cachedCrate.json, "Subcrate (Cached)", baseUrl.value);
+    return;
+  }
+
+  // Only show loading for non-cached fetches
+  isLoading.value = true;
+
+  try {
+    // Stateless mode: fetch directly without indexing service
+    if (config.isStateless) {
+      // Construct the full URL to the subcrate's metadata file (using preserved filename)
+      let fetchUrl: string;
+      if (subcrateBaseUrl === ".") {
+        fetchUrl = metadataFilename;
+      } else if (subcrateBaseUrl.toLowerCase().endsWith("ro-crate-metadata.json")) {
+        // Already has the filename (shouldn't happen due to normalization above, but defensive)
+        fetchUrl = subcrateBaseUrl;
+      } else {
+        // Append the preserved metadata filename
+        fetchUrl = subcrateBaseUrl.endsWith("/")
+          ? subcrateBaseUrl + metadataFilename
+          : subcrateBaseUrl + "/" + metadataFilename;
+      }
+
+      const json = await fetchCrateFromUrl(fetchUrl);
+
+      // Only update baseUrl after successful fetch to avoid inconsistent state on errors
+      baseUrl.value = subcrateBaseUrl.endsWith("/") ? subcrateBaseUrl : subcrateBaseUrl + "/";
+      inputUrl.value = subcrateBaseUrl;
+      currentUrl.value = baseUrl.value;
+
+      await processCrateData(json, "Subcrate", baseUrl.value);
+    } else {
+      // Stateful mode: use indexing service
+      // The indexing service expects directory URLs without trailing slash
+      const apiCrateId = subcrateBaseUrl.endsWith("/")
+        ? subcrateBaseUrl.slice(0, -1)
+        : subcrateBaseUrl;
+
+      // Update state before fetch for stateful mode (consistent with original behavior)
+      baseUrl.value = subcrateBaseUrl.endsWith("/") ? subcrateBaseUrl : subcrateBaseUrl + "/";
+      inputUrl.value = subcrateBaseUrl;
+      currentUrl.value = baseUrl.value;
+
+      // Fetch metadata (this calls processCrateData internally)
+      await fetchMetadata(apiCrateId, "Subcrate", baseUrl.value);
+    }
+  } catch (e: any) {
+    errorMsg.value = `Error loading subcrate: ${e.message}`;
+  } finally {
     isLoading.value = false;
-  });
+  }
 };
 
 const goToBreadcrumb = (index: number) => {
   const target = historyStack.value[index];
   if (!target || !target.url) return;
 
+  // Truncate history stack to items before the clicked breadcrumb
+  // e.g., clicking on index 1 means we keep items 0 (items before index 1)
   historyStack.value = historyStack.value.slice(0, index);
+
   inputUrl.value = target.url;
   loadFromUrl();
 };
 
 const goBack = () => {
   if (historyStack.value.length === 0) return;
-  const previous = historyStack.value.pop();
-  if (previous && previous.url) {
-    inputUrl.value = previous.url;
+  // Pop the last breadcrumb (parent crate) and navigate to it
+  const parent = historyStack.value.pop();
+  if (parent && parent.url) {
+    inputUrl.value = parent.url;
     loadFromUrl();
   }
 };
@@ -715,6 +1049,13 @@ const resetApp = () => {
   searchResults.value = [];
   searchErrorMsg.value = null;
   hasSearched.value = false;
+
+  // Clear the crate cache and root URL
+  crateCache.clear();
+  rootCrateUrl.value = null;
+
+  // Clear the search index
+  clearSearchIndex();
 };
 
 onMounted(() => {
@@ -725,7 +1066,8 @@ onMounted(() => {
   if (crateParam) {
     try {
       const parsed = JSON.parse(crateParam);
-      processCrateData(parsed, "Shared Crate", null);
+      // Shared crate is always a fresh start
+      processCrateData(parsed, "Shared Crate", null, true);
 
       const cleanUrl = new URL(window.location.href);
       cleanUrl.searchParams.delete("crate");
@@ -747,6 +1089,32 @@ onMounted(() => {
     isDark.value = true;
     document.documentElement.classList.add("dark");
   }
+});
+
+onUnmounted(() => {
+  if (shareToastTimeout) {
+    clearTimeout(shareToastTimeout);
+  }
+});
+
+// Debounced search for stateless mode - search as user types
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+watch(searchInput, (newValue) => {
+  if (!config.isStateless) return;
+
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+  }
+
+  if (!newValue) {
+    searchResults.value = [];
+    hasSearched.value = false;
+    return;
+  }
+
+  searchDebounceTimer = setTimeout(() => {
+    runSearch();
+  }, 150); // Short debounce for responsive feel
 });
 
 const showShareToast = (message: string, isError = false) => {
@@ -798,7 +1166,7 @@ const copyShareLink = async () => {
 
 <template>
   <div
-    class="flex flex-col min-h-screen pb-10 relative isolate bg-[var(--c-bg-app)] text-[var(--c-text-muted)] transition-colors duration-300"
+    class="flex flex-col min-h-screen pb-10 relative isolate bg-(--c-bg-app) text-(--c-text-muted) transition-colors duration-300"
   >
     <img
       :src="arunaBg"
@@ -807,11 +1175,11 @@ const copyShareLink = async () => {
     />
 
     <div
-      class="w-full border-b border-[var(--c-border)] bg-[var(--c-bg-card)]/90 backdrop-blur-sm shadow-sm flex justify-center px-4 md:px-6 transition-colors duration-300"
+      class="w-full border-b border-(--c-border) bg-(--c-bg-card)/90 backdrop-blur-sm shadow-sm flex justify-center px-4 md:px-6 transition-colors duration-300"
     >
       <div class="w-full max-w-[1600px] py-4 flex justify-between items-center">
         <h1
-          class="text-3xl font-light text-[var(--c-text-main)] cursor-pointer select-none hover:text-[#00A0CC] transition-colors"
+          class="text-3xl font-light text-(--c-text-main) cursor-pointer select-none hover:text-[#00A0CC] transition-colors"
           @click="resetApp"
         >
           RO-Crate Explorer
@@ -821,10 +1189,10 @@ const copyShareLink = async () => {
             v-if="allEntities.length > 0"
             variant="ghost"
             size="sm"
-            class="h-9 px-3 rounded-full border border-[var(--c-border)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)]"
+            class="h-9 px-3 rounded-full border border-(--c-border) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main)"
             @click="copyShareLink"
-            :disabled="!fullCrateJson"
-            title="Copy a shareable URL with the current crate embedded"
+            :disabled="!fullCrateJson || isCrateTooLargeToShare"
+            :title="isCrateTooLargeToShare ? 'Crate is too large to share via URL' : 'Copy a shareable URL with the current crate embedded'"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -849,7 +1217,7 @@ const copyShareLink = async () => {
             v-if="allEntities.length > 0"
             variant="ghost"
             size="sm"
-            class="h-9 w-9 p-0 rounded-full border border-[var(--c-border)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)]"
+            class="h-9 w-9 p-0 rounded-full border border-(--c-border) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main)"
             @click="isSearchOverlayOpen = true"
             title="Search Crate"
           >
@@ -872,7 +1240,7 @@ const copyShareLink = async () => {
           <Button
             variant="ghost"
             size="sm"
-            class="h-9 w-9 p-0 rounded-full border border-[var(--c-border)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)]"
+            class="h-9 w-9 p-0 rounded-full border border-(--c-border) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main)"
             @click="toggleTheme"
           >
             <svg
@@ -916,7 +1284,7 @@ const copyShareLink = async () => {
             v-if="allEntities.length > 0"
             variant="secondary"
             size="sm"
-            class="bg-[var(--c-hover)] text-[var(--c-text-main)] hover:bg-[#00A0CC] hover:text-white border border-[var(--c-border)]"
+            class="bg-(--c-hover) text-(--c-text-main) hover:bg-[#00A0CC] hover:text-white border border-(--c-border)"
             @click="resetApp"
           >
             Load New Crate
@@ -925,7 +1293,7 @@ const copyShareLink = async () => {
       </div>
     </div>
 
-    <div class="flex-grow w-full px-4 md:px-6 pt-6 flex flex-col items-center">
+    <div class="grow w-full px-4 md:px-6 pt-6 flex flex-col items-center">
       <div
         v-if="errorMsg"
         class="w-full max-w-4xl bg-red-900/20 border border-red-800 text-red-400 px-4 py-3 rounded mb-6"
@@ -936,28 +1304,28 @@ const copyShareLink = async () => {
 
       <div
         v-if="allEntities.length === 0 && !isLoading"
-        class="flex-grow flex flex-col items-center justify-center w-full max-w-5xl"
+        class="grow flex flex-col items-center justify-center w-full max-w-5xl"
       >
         <Card
-          class="w-full max-w-xl shadow-xl bg-[var(--c-bg-card)] border-[var(--c-border)]"
+          class="w-full max-w-xl shadow-xl bg-(--c-bg-card) border-(--c-border)"
         >
           <CardHeader>
-            <CardTitle class="text-2xl text-center text-[var(--c-text-main)]"
+            <CardTitle class="text-2xl text-center text-(--c-text-main)"
               >Load RO-Crate</CardTitle
             >
-            <CardDescription class="text-center text-[var(--c-text-muted)]"
+            <CardDescription class="text-center text-(--c-text-muted)"
               >Paste JSON, provide a URL, or upload a ZIP/JSON file.</CardDescription
             >
           </CardHeader>
           <CardContent class="flex flex-col gap-8 p-8">
             <div class="space-y-2">
               <label
-                class="text-sm font-semibold text-[var(--c-text-muted)] block text-center"
+                class="text-sm font-semibold text-(--c-text-muted) block text-center"
                 >Paste the contents of <code>ro-crate-metadata.json</code></label
               >
               <textarea
                 v-model="pastedCrateText"
-                class="w-full min-h-[180px] rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
+                class="w-full min-h-[180px] rounded-md border border-(--c-border) bg-(--c-bg-app) text-(--c-text-main) px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
                 placeholder='{\n  "@context": "https://w3id.org/ro/crate/1.1/context",\n  "@graph": [ ... ]\n}'
               ></textarea>
               <Button
@@ -968,10 +1336,10 @@ const copyShareLink = async () => {
             </div>
             <div class="relative">
               <div class="absolute inset-0 flex items-center">
-                <span class="w-full border-t border-[var(--c-border)]" />
+                <span class="w-full border-t border-(--c-border)" />
               </div>
               <div class="relative flex justify-center text-xs uppercase tracking-wider">
-                <span class="bg-[var(--c-bg-card)] px-2 text-[var(--c-text-muted)]/60"
+                <span class="bg-(--c-bg-card) px-2 text-(--c-text-muted)/60"
                   >Or load from URL</span
                 >
               </div>
@@ -980,7 +1348,7 @@ const copyShareLink = async () => {
               <input
                 v-model="inputUrl"
                 type="text"
-                class="flex h-11 w-full rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
+                class="flex h-11 w-full rounded-md border border-(--c-border) bg-(--c-bg-app) text-(--c-text-main) px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
                 placeholder="https://..."
               />
               <Button
@@ -991,34 +1359,34 @@ const copyShareLink = async () => {
             </div>
             <div class="relative">
               <div class="absolute inset-0 flex items-center">
-                <span class="w-full border-t border-[var(--c-border)]" />
+                <span class="w-full border-t border-(--c-border)" />
               </div>
               <div class="relative flex justify-center text-xs uppercase tracking-wider">
-                <span class="bg-[var(--c-bg-card)] px-2 text-[var(--c-text-muted)]/60"
+                <span class="bg-(--c-bg-card) px-2 text-(--c-text-muted)/60"
                   >Or upload a file</span
                 >
               </div>
             </div>
             <div class="space-y-3">
               <label
-                class="text-sm font-semibold text-[var(--c-text-muted)] block text-center"
+                class="text-sm font-semibold text-(--c-text-muted) block text-center"
                 >Upload File</label
               >
               <div class="flex items-center justify-center w-full">
                 <label
                   for="dropzone-file"
-                  class="flex flex-col items-center justify-center w-full h-32 border-2 border-[var(--c-border)] border-dashed rounded-lg cursor-pointer bg-[var(--c-bg-app)] hover:bg-[var(--c-hover)] transition-colors group"
+                  class="flex flex-col items-center justify-center w-full h-32 border-2 border-(--c-border) border-dashed rounded-lg cursor-pointer bg-(--c-bg-app) hover:bg-(--c-hover) transition-colors group"
                 >
                   <div
                     class="flex flex-col items-center justify-center pt-5 pb-6 text-center"
                   >
                     <p
-                      class="text-sm text-[var(--c-text-muted)] group-hover:text-[var(--c-text-main)] transition-colors"
+                      class="text-sm text-(--c-text-muted) group-hover:text-(--c-text-main) transition-colors"
                     >
                       <span class="font-semibold text-[#00A0CC]">Click to upload</span> or
                       drag and drop
                     </p>
-                    <p class="text-xs text-[var(--c-text-muted)]/60 mt-1">
+                    <p class="text-xs text-(--c-text-muted)/60 mt-1">
                       .zip archive or .json metadata
                     </p>
                   </div>
@@ -1038,12 +1406,12 @@ const copyShareLink = async () => {
 
       <div
         v-if="isLoading"
-        class="flex-grow flex flex-col items-center justify-center w-full"
+        class="grow flex flex-col items-center justify-center w-full"
       >
         <div
           class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-[#00A0CC] mb-6"
         ></div>
-        <p class="text-xl text-[var(--c-text-muted)] font-light">Processing Crate...</p>
+        <p class="text-xl text-(--c-text-muted) font-light">Processing Crate...</p>
       </div>
 
       <div
@@ -1051,14 +1419,14 @@ const copyShareLink = async () => {
         class="w-full max-w-[1600px] flex flex-col gap-4 h-[80vh]"
       >
         <div
-          class="w-full bg-[var(--c-bg-card)] border border-[var(--c-border)] text-[var(--c-text-muted)] rounded-md p-3 flex items-center gap-4 shadow-sm"
+          class="w-full bg-(--c-bg-card) border border-(--c-border) text-(--c-text-muted) rounded-md p-3 flex items-center gap-4 shadow-sm"
         >
           <Button
             variant="outline"
             size="sm"
             @click="goBack"
             :disabled="historyStack.length === 0"
-            class="flex items-center gap-1 border-[var(--c-border)] bg-[var(--c-bg-app)] hover:bg-[var(--c-hover)] text-[var(--c-text-muted)] hover:text-[var(--c-text-main)]"
+            class="flex items-center gap-1 border-(--c-border) bg-(--c-bg-app) hover:bg-(--c-hover) text-(--c-text-muted) hover:text-(--c-text-main)"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -1075,7 +1443,7 @@ const copyShareLink = async () => {
             </svg>
             Back
           </Button>
-          <nav class="flex items-center flex-wrap text-sm text-[var(--c-text-muted)]">
+          <nav class="flex items-center flex-wrap text-sm text-(--c-text-muted)">
             <template v-for="(item, index) in historyStack" :key="index">
               <button
                 @click="goToBreadcrumb(index)"
@@ -1083,7 +1451,7 @@ const copyShareLink = async () => {
               >
                 {{ item.name }}
               </button>
-              <span class="text-[var(--c-text-muted)]/40 mx-1">/</span>
+              <span class="text-(--c-text-muted)/40 mx-1">/</span>
             </template>
             <span class="font-bold text-[#00A0CC] px-1">{{ currentCrateName }}</span>
           </nav>
@@ -1093,13 +1461,13 @@ const copyShareLink = async () => {
           class="grid grid-cols-1 md:grid-cols-[300px_1fr] gap-6 h-full overflow-hidden pb-2 w-full"
         >
           <aside
-            class="col-span-1 bg-[var(--c-bg-card)] border border-[var(--c-border)] rounded-lg shadow-sm flex flex-col h-full overflow-hidden transition-colors duration-300"
+            class="col-span-1 bg-(--c-bg-card) border border-(--c-border) rounded-lg shadow-sm flex flex-col h-full overflow-hidden transition-colors duration-300"
           >
             <div
-              class="p-3 bg-[var(--c-bg-app)] border-b border-[var(--c-border)] flex-shrink-0"
+              class="p-3 bg-(--c-bg-app) border-b border-(--c-border) shrink-0"
             >
               <h2
-                class="text-xs font-bold text-[var(--c-text-muted)]/80 uppercase tracking-wider"
+                class="text-xs font-bold text-(--c-text-muted)/80 uppercase tracking-wider"
               >
                 Files
               </h2>
@@ -1112,21 +1480,21 @@ const copyShareLink = async () => {
               />
             </div>
             <div
-              class="h-1 bg-[var(--c-bg-app)] border-t border-b border-[var(--c-border)]"
+              class="h-1 bg-(--c-bg-app) border-t border-b border-(--c-border)"
             ></div>
 
             <div
-              class="p-3 bg-[var(--c-bg-app)] border-b border-[var(--c-border)] flex-shrink-0 flex flex-col gap-2"
+              class="p-3 bg-(--c-bg-app) border-b border-(--c-border) shrink-0 flex flex-col gap-2"
             >
               <h2
-                class="text-xs font-bold text-[var(--c-text-muted)]/80 uppercase tracking-wider"
+                class="text-xs font-bold text-(--c-text-muted)/80 uppercase tracking-wider"
               >
                 Context Entities
               </h2>
               <input
                 v-model="contextFilterInput"
                 type="text"
-                class="flex h-7 w-full rounded-md border border-[var(--c-border)] bg-[var(--c-bg-card)] text-[var(--c-text-main)] px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#00A0CC] placeholder:text-gray-500/80"
+                class="flex h-7 w-full rounded-md border border-(--c-border) bg-(--c-bg-card) text-(--c-text-main) px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#00A0CC] placeholder:text-gray-500/80"
                 placeholder="Filter by Type (e.g., Person, Organization)"
               />
             </div>
@@ -1141,16 +1509,16 @@ const copyShareLink = async () => {
                 >
                   {{ groupName }}
                 </h3>
-                <div class="flex flex-col gap-[1px]">
+                <div class="flex flex-col gap-px">
                   <button
                     v-for="entity in entities"
                     :key="entity['@id']"
                     @click="selectEntity(entity['@id'])"
                     :class="[
-                      'text-left px-2 py-1 text-sm rounded-sm hover:bg-[var(--c-hover)] transition-all truncate border-l-2 w-full',
+                      'text-left px-2 py-1 text-sm rounded-sm hover:bg-(--c-hover) transition-all truncate border-l-2 w-full',
                       selectedEntityId === entity['@id']
-                        ? 'bg-[var(--c-hover)] text-[#00A0CC] border-[#00A0CC] font-medium shadow-sm'
-                        : 'text-[var(--c-text-muted)] border-transparent',
+                        ? 'bg-(--c-hover) text-[#00A0CC] border-[#00A0CC] font-medium shadow-sm'
+                        : 'text-(--c-text-muted) border-transparent',
                     ]"
                     :title="entity['@id']"
                   >
@@ -1176,7 +1544,7 @@ const copyShareLink = async () => {
               />
               <div
                 v-else
-                class="h-full flex flex-col items-center justify-center bg-[var(--c-bg-card)] border border-dashed border-[var(--c-border)] rounded-lg text-[var(--c-text-muted)]/50 transition-colors duration-300"
+                class="h-full flex flex-col items-center justify-center bg-(--c-bg-card) border border-dashed border-(--c-border) rounded-lg text-(--c-text-muted)/50 transition-colors duration-300"
               >
                 <p>Select an entity to view details.</p>
               </div>
@@ -1188,10 +1556,10 @@ const copyShareLink = async () => {
 
     <AlertDialog :open="isDetailOverlayOpen" @update:open="isDetailOverlayOpen = $event">
       <AlertDialogContent
-        class="text-[var(--c-text-muted)] bg-[var(--c-bg-card)] border-[var(--c-border)] max-w-4xl max-h-[80vh] overflow-y-auto"
+        class="text-(--c-text-muted) bg-(--c-bg-card) border-(--c-border) max-w-4xl max-h-[80vh] overflow-y-auto"
       >
         <button
-          class="absolute right-4 top-4 p-1 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none hover:bg-[var(--c-hover)] text-[var(--c-text-muted)]"
+          class="absolute right-4 top-4 p-1 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none hover:bg-(--c-hover) text-(--c-text-muted)"
           @click="isDetailOverlayOpen = false"
         >
           <svg
@@ -1211,14 +1579,14 @@ const copyShareLink = async () => {
           <span class="sr-only">Close</span>
         </button>
         <AlertDialogHeader>
-          <AlertDialogTitle class="flex items-center gap-2 text-[var(--c-text-main)]"
+          <AlertDialogTitle class="flex items-center gap-2 text-(--c-text-main)"
             ><span
-              class="bg-[var(--c-hover)] text-[#00A0CC] text-xs px-2 py-0.5 rounded uppercase"
+              class="bg-(--c-hover) text-[#00A0CC] text-xs px-2 py-0.5 rounded uppercase"
               >Linked Entity</span
             >
             {{ linkedEntityData?.id }}</AlertDialogTitle
           >
-          <AlertDialogDescription class="text-[var(--c-text-muted)]/80"
+          <AlertDialogDescription class="text-(--c-text-muted)/80"
             >Type: {{ linkedEntityData?.type }}</AlertDialogDescription
           >
         </AlertDialogHeader>
@@ -1226,13 +1594,13 @@ const copyShareLink = async () => {
           <div
             v-for="(propString, index) in linkedEntityData.otherProps"
             :key="index"
-            class="p-3 bg-[var(--c-bg-app)] rounded border border-[var(--c-border)] text-sm"
+            class="p-3 bg-(--c-bg-app) rounded border border-(--c-border) text-sm"
           >
-            <div class="font-bold text-[var(--c-text-muted)] text-xs uppercase mb-1">
+            <div class="font-bold text-(--c-text-muted) text-xs uppercase mb-1">
               {{ propString.split(":\n")[0] }}
             </div>
             <div
-              class="whitespace-pre-wrap font-mono text-xs text-[var(--c-text-muted)]/80"
+              class="whitespace-pre-wrap font-mono text-xs text-(--c-text-muted)/80"
             >
               {{ propString.split(":\n")[1] }}
             </div>
@@ -1250,10 +1618,10 @@ const copyShareLink = async () => {
 
     <AlertDialog :open="isSearchOverlayOpen" @update:open="isSearchOverlayOpen = $event">
       <AlertDialogContent
-        class="text-[var(--c-text-muted)] bg-[var(--c-bg-card)] border-[var(--c-border)] !max-w-xl max-h-[80vh] overflow-y-auto"
+        class="text-(--c-text-muted) bg-(--c-bg-card) border-(--c-border) max-w-xl! max-h-[80vh] overflow-y-auto"
       >
         <button
-          class="absolute right-4 top-4 p-1 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none hover:bg-[var(--c-hover)] text-[var(--c-text-muted)]"
+          class="absolute right-4 top-4 p-1 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none hover:bg-(--c-hover) text-(--c-text-muted)"
           @click="isSearchOverlayOpen = false"
         >
           <svg
@@ -1273,14 +1641,17 @@ const copyShareLink = async () => {
           <span class="sr-only">Close</span>
         </button>
         <AlertDialogHeader>
-          <AlertDialogTitle class="text-[var(--c-text-main)]"
+          <AlertDialogTitle class="text-(--c-text-main)"
             >Search RO-Crate Entities</AlertDialogTitle
           >
-          <AlertDialogDescription class="text-[var(--c-text-muted)]/80"
+          <AlertDialogDescription v-if="!config.isStateless" class="text-(--c-text-muted)/80"
             >Use the Tantivy query format, e.g.,
-            <code class="bg-[var(--c-bg-app)] px-1 rounded font-mono"
+            <code class="bg-(--c-bg-app) px-1 rounded font-mono"
               >author.name:Smith AND entity_type:Dataset</code
             >.</AlertDialogDescription
+          >
+          <AlertDialogDescription v-else class="text-(--c-text-muted)/80"
+            >Search by entity ID, name, or type.</AlertDialogDescription
           >
         </AlertDialogHeader>
 
@@ -1289,11 +1660,12 @@ const copyShareLink = async () => {
             v-model="searchInput"
             @keyup.enter="runSearch"
             type="text"
-            class="flex h-10 w-full rounded-md border border-[var(--c-border)] bg-[var(--c-bg-app)] text-[var(--c-text-main)] px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
+            class="flex h-10 w-full rounded-md border border-(--c-border) bg-(--c-bg-app) text-(--c-text-main) px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00A0CC] placeholder:text-gray-500"
             placeholder="Search query..."
           />
           <Button
-            class="h-10 px-4 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white flex-shrink-0"
+            v-if="!config.isStateless"
+            class="h-10 px-4 bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white shrink-0"
             @click="runSearch"
             :disabled="isSearching || !searchInput"
           >
@@ -1332,32 +1704,36 @@ const copyShareLink = async () => {
 
         <div
           v-if="searchResults.length > 0"
-          class="mt-4 p-2 bg-[var(--c-bg-app)] rounded border border-[var(--c-border)] max-h-[30vh] overflow-y-auto"
+          class="mt-4 p-2 bg-(--c-bg-app) rounded border border-(--c-border) max-h-[30vh] overflow-y-auto"
         >
           <p
-            class="text-xs font-bold text-[var(--c-text-muted)]/80 uppercase tracking-wider mb-1 px-1"
+            class="text-xs font-bold text-(--c-text-muted)/80 uppercase tracking-wider mb-1 px-1"
           >
             {{ searchResults.length }} result(s) found
           </p>
           <div class="flex flex-col gap-1">
             <button
-              v-for="id in searchResults"
-              :key="id"
-              @click="handleSearchSelect(id)"
-              class="w-full text-left p-2 text-sm rounded-md hover:bg-[var(--c-hover)] transition-colors text-[var(--c-text-main)] truncate font-mono"
+              v-for="result in searchResults"
+              :key="result.entityId + result.crateId"
+              @click="handleSearchSelect(result)"
+              class="w-full text-left p-2 text-sm rounded-md hover:bg-(--c-hover) transition-colors text-(--c-text-main) truncate font-mono"
               :class="{
-                'bg-[var(--c-hover)] text-[#00A0CC] font-semibold':
-                  selectedEntityId === id,
+                'bg-(--c-hover) text-[#00A0CC] font-semibold':
+                  selectedEntityId === result.entityId,
               }"
-              :title="id"
+              :title="result.entityId"
             >
-              {{ id }}
+              <span>{{ result.entityId }}</span>
+              <span
+                v-if="result.crateId !== currentUrl"
+                class="ml-2 text-xs text-(--c-text-muted)/60"
+              >({{ result.crateId.split('/').slice(-2, -1)[0] || 'other crate' }})</span>
             </button>
           </div>
         </div>
         <div
           v-else-if="hasSearched && !isSearching"
-          class="mt-4 p-2 text-center text-sm text-[var(--c-text-muted)]/60"
+          class="mt-4 p-2 text-center text-sm text-(--c-text-muted)/60"
         >
           No results found for the last query.
         </div>
