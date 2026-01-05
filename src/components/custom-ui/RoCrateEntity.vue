@@ -85,6 +85,32 @@ const getLinkedEntityType = (entityId: string): string[] => {
   return []
 }
 
+const getLinkedEntity = (entityId: string): any => {
+  if (!props.fullCrateJson) return null
+  try {
+    const json = JSON.parse(props.fullCrateJson)
+    const graph = json['@graph'] || []
+    return graph.find((e: any) => e['@id'] === entityId) || null
+  } catch (e) {
+    return null
+  }
+}
+
+const getSubcrateMetadataPath = (entityId: string): string => {
+  const entity = getLinkedEntity(entityId)
+  if (entity && entity.subjectOf) {
+    const subjectOf = Array.isArray(entity.subjectOf) ? entity.subjectOf[0] : entity.subjectOf
+    if (subjectOf && subjectOf['@id']) {
+      return subjectOf['@id']
+    }
+    if (typeof subjectOf === 'string') {
+      return subjectOf
+    }
+  }
+  // Fallback: return the entity @id itself (may be a directory path)
+  return entityId
+}
+
 // Detects subcrates explicitly linked via ro-crate-metadata.json
 const isSubcrateLink = (key: string, value: any): boolean => {
   if (key.toLowerCase() === 'subjectof') {
@@ -468,7 +494,7 @@ const valueIri = (key: string, index = 0) => props.linkedData?.[key]?.valueIris?
                   <Button
                     size="sm"
                     class="bg-[#00A0CC] hover:bg-[#00A0CC]/80 text-white shrink-0 h-7 text-xs whitespace-nowrap"
-                    @click="onSubcrateOpen(item['@id'])"
+                    @click="onSubcrateOpen(isStructuralSubcrate(getKey(propString), item) ? getSubcrateMetadataPath(item['@id']) : item['@id'])"
                   >
                     Explore Subcrate
                     <svg
